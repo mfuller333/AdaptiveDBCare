@@ -84,8 +84,14 @@ ALTER PROCEDURE [DBA].[usp_UpdateStatisticsIfChanged]
       @TargetDatabases         NVARCHAR(MAX) = NULL,   -- CSV | 'ALL_USER_DBS' (exact case) | with '-DbName' excludes
       @ChangeThresholdPercent  DECIMAL(6,2)  = NULL,   -- used when @ChangeScope IS NULL
       @ChangeScope             VARCHAR(20)   = NULL,   -- 'ALL_CHANGES' (exact case) or NULL
+<<<<<<< HEAD
+      @SampleMode              VARCHAR(12)   = 'DEFAULT', -- 'FULLSCAN' | 'DEFAULT' | 'SAMPLED' (exact case)
+      @SamplePercent           DECIMAL(6,2)  = 1,   -- 1..100 when @SampleMode='SAMPLED' (rounded to INT)
+      @LogDatabase             SYSNAME       = NULL,   -- defaults to this utility DB if NULL
+=======
       @SampleMode              VARCHAR(12)   = 'DEFAULT', -- 'FULLSCAN' | 'DEFAULT' | 'SAMPLED'
       @SamplePercent           DECIMAL(6,2)  = NULL,   -- 1..100 when @SampleMode='SAMPLED'
+>>>>>>> 08e77fc426db279583cfbad233a5b893f29b4243
       @WhatIf                  BIT           = 1
 AS
 BEGIN
