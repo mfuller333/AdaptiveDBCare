@@ -16,29 +16,29 @@ IF OBJECT_ID('DBA.UpdateStatsLog','U') IS NULL
 BEGIN
     CREATE TABLE DBA.UpdateStatsLog
     (
-        log_id               BIGINT IDENTITY(1,1) PRIMARY KEY,
-        run_utc              DATETIME2(3)   NOT NULL CONSTRAINT DF_USL_run DEFAULT (SYSUTCDATETIME()),
-        database_name        SYSNAME        NOT NULL,
-        schema_name          SYSNAME        NOT NULL,
-        table_name           SYSNAME        NOT NULL,
-        stats_name           SYSNAME        NOT NULL,
-        stats_id             INT            NOT NULL,
+        [log_id]               BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [run_utc]              DATETIME2(3)   NOT NULL CONSTRAINT DF_USL_run DEFAULT (SYSUTCDATETIME()),
+        [database_name]        SYSNAME        NOT NULL,
+        [schema_name]          SYSNAME        NOT NULL,
+        [table_name]          SYSNAME        NOT NULL,
+        [stats_name]           SYSNAME        NOT NULL,
+        [stats_id]             INT            NOT NULL,
         [rows]               BIGINT         NULL,
-        modification_counter BIGINT         NULL,
-        change_pct           DECIMAL(19,4)   NULL,
-        last_updated         DATETIME2(3)   NULL,
-        rows_sampled         BIGINT         NULL,
-        sample_mode          VARCHAR(12)    NOT NULL,
+        [modification_counter] BIGINT         NULL,
+        [change_pct]           DECIMAL(19,4)   NULL,
+        [last_updated]         DATETIME2(3)   NULL,
+        [rows_sampled]         BIGINT         NULL,
+        [sample_mode]          VARCHAR(12)    NOT NULL,
         [action]             VARCHAR(20)    NOT NULL,
-        cmd                  NVARCHAR(MAX)  NOT NULL,
+        [cmd]                 NVARCHAR(MAX)  NOT NULL,
         [status]             VARCHAR(20)    NOT NULL,
-        error_message        NVARCHAR(4000) NULL,
-        error_number         INT            NULL,
-        error_severity       INT            NULL,
-        error_state          INT            NULL,
-        error_line           INT            NULL,
-        error_proc           NVARCHAR(128)  NULL,
-        run_id               UNIQUEIDENTIFIER NULL
+        [error_message]        NVARCHAR(4000) NULL,
+        [error_number]         INT            NULL,
+        [error_severity]       INT            NULL,
+        [error_state]          INT            NULL,
+        [error_line]           INT            NULL,
+        [error_proc]           NVARCHAR(128)  NULL,
+        [run_id]               UNIQUEIDENTIFIER NULL
     );
 END;
 GO
@@ -75,8 +75,8 @@ GO
 /****** Output:      Rows logged to DBA.UpdateStatsLog with action, status, change%, command, and details.       ****/
 /******              Progress messages printed as stats are analyzed and updated.                                ****/
 /****** Created by:  Mike Fuller                                                                                 ****/
-/****** Date Updated: 12/06/2025                                                                                 ****/
-/****** Version:     2.1 (cross-DB, central log, progress messages)                                              ****/
+/****** Date Updated: 01/08/2026                                                                                 ****/
+/****** Version:     2.1.1 (cross-DB, central log, progress messages)                                              ****/
 /******                                                                                               ¯\_(ツ)_/¯ ****/
 /********************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_UpdateStatisticsIfChanged]
@@ -84,14 +84,9 @@ ALTER PROCEDURE [DBA].[usp_UpdateStatisticsIfChanged]
       @TargetDatabases         NVARCHAR(MAX) = NULL,   -- CSV | 'ALL_USER_DBS' (exact case) | with '-DbName' excludes
       @ChangeThresholdPercent  DECIMAL(6,2)  = NULL,   -- used when @ChangeScope IS NULL
       @ChangeScope             VARCHAR(20)   = NULL,   -- 'ALL_CHANGES' (exact case) or NULL
-<<<<<<< HEAD
       @SampleMode              VARCHAR(12)   = 'DEFAULT', -- 'FULLSCAN' | 'DEFAULT' | 'SAMPLED' (exact case)
       @SamplePercent           DECIMAL(6,2)  = 1,   -- 1..100 when @SampleMode='SAMPLED' (rounded to INT)
       @LogDatabase             SYSNAME       = NULL,   -- defaults to this utility DB if NULL
-=======
-      @SampleMode              VARCHAR(12)   = 'DEFAULT', -- 'FULLSCAN' | 'DEFAULT' | 'SAMPLED'
-      @SamplePercent           DECIMAL(6,2)  = NULL,   -- 1..100 when @SampleMode='SAMPLED'
->>>>>>> 08e77fc426db279583cfbad233a5b893f29b4243
       @WhatIf                  BIT           = 1
 AS
 BEGIN
