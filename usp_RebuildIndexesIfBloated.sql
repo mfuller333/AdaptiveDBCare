@@ -46,7 +46,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
 /****** Date Updated: 01/08/2026                                                                            ******/
-/****** Version:     1.10                                                                                   ******/
+/****** Version:     2.0                                                                                   ******/
 /*****************************************************************************************************************/
 CREATE PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
@@ -329,7 +329,78 @@ BEGIN
                   error_line           INT            NULL,
                   error_proc           NVARCHAR(128)  NULL
               );
-          END';
+          END
+		  
+		  IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NOT NULL
+			BEGIN
+				IF EXISTS
+				(
+					SELECT 1
+					FROM sys.columns
+					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+						AND name = N''cmd''
+						AND system_type_id = 231
+						AND max_length <> -1
+				)
+				BEGIN
+					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
+				END
+
+				IF EXISTS
+				(
+					SELECT 1
+					FROM sys.columns
+					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+						AND name = N''error_message''
+						AND system_type_id = 231
+						AND max_length > 0
+						AND max_length < 8000
+				)
+				BEGIN
+					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
+				END
+
+				IF EXISTS
+				(
+					SELECT 1
+					FROM sys.columns
+					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+						AND name = N''status''
+						AND system_type_id = 167
+						AND max_length < 30
+				)
+				BEGIN
+					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
+				END
+
+				IF EXISTS
+				(
+					SELECT 1
+					FROM sys.columns
+					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+						AND name = N''action''
+						AND system_type_id = 167
+						AND max_length < 20
+				)
+				BEGIN
+					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
+				END
+
+				IF EXISTS
+				(
+					SELECT 1
+					FROM sys.columns
+					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+						AND name = N''error_proc''
+						AND system_type_id = 231
+						AND max_length > 0
+						AND max_length < 256
+				)
+				BEGIN
+					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
+				END
+			END
+			';
 
         BEGIN TRY
             EXEC (@ddl);
@@ -620,7 +691,7 @@ BEGIN
                 N'' WITH (SORT_IN_TEMPDB = '' + CASE WHEN @pSortInTempdb = 1 THEN N''ON'' ELSE N''OFF'' END +
                 CASE WHEN @ff IS NOT NULL THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), @ff) ELSE N'''' END +
                 CASE WHEN @pMaxDOP IS NOT NULL THEN N'', MAXDOP = '' + CONVERT(VARCHAR(5), @pMaxDOP) ELSE N'''' END +
-                CASE WHEN @pIncludeDataCompressionOption = 1 THEN N'', DATA_COMPRESSION = '' + @comp ELSE N'''' END +
+                CASE WHEN @pIncludeDataCompressionOption = 1 THEN N'', DATA_COMPRESSION = '' + LEFT(@comp, 60) ELSE N'''' END +
                 N'');'';
 
             BEGIN TRY
@@ -645,9 +716,11 @@ BEGIN
                           OR (@ErrMsg LIKE N''%ONLINE%'' AND (@ErrMsg LIKE N''%not allowed%'' OR @ErrMsg LIKE N''%not supported%'' OR @ErrMsg LIKE N''%does not support%'' OR @ErrMsg LIKE N''%cannot%''))
                        )
                 BEGIN
-                    SET @msg = N''ONLINE not possible, retrying OFFLINE for ''
-                             + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                             + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
+					SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
+							 + LEFT(@ErrMsg, 1500)
+							 + N'' | retrying OFFLINE for ''
+							 + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+							 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
                     ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
                     BEGIN TRY
@@ -669,23 +742,34 @@ BEGIN
                                  + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
                         ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
                     END TRY
-                    BEGIN CATCH
-                        UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-                            SET [status]       = ''FAILED'',
-                                online_on      = 0,
-                                cmd            = @cmdOffline,
-                                error_message  = ERROR_MESSAGE(),
-                                error_number   = ERROR_NUMBER(),
-                                error_severity = ERROR_SEVERITY(),
-                                error_state    = ERROR_STATE(),
-                                error_line     = ERROR_LINE(),
-                                error_proc     = ERROR_PROCEDURE()
-                        WHERE log_id = @log_id;
+					BEGIN CATCH
+						DECLARE @ErrNum2 INT = ERROR_NUMBER();
+						DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
 
-                        SET @msg = N''FAILED   (OFFLINE fallback) '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                                 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): '' + CONVERT(NVARCHAR(4000), ERROR_MESSAGE());
-                        ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-                    END CATCH;
+						DECLARE @CombinedErr NVARCHAR(4000) =
+							LEFT(
+								N''ONLINE failed (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): '' + @ErrMsg
+								+ N'' | OFFLINE failed (Error '' + CONVERT(NVARCHAR(12), @ErrNum2) + N''): '' + @ErrMsg2
+							, 4000);
+
+						UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
+							SET [status]       = ''FAILED_OFFLINE_FALLBACK'',
+								online_on      = 0,
+								cmd            = @cmdOffline,
+								error_message  = @CombinedErr,
+								error_number   = @ErrNum2,
+								error_severity = ERROR_SEVERITY(),
+								error_state    = ERROR_STATE(),
+								error_line     = ERROR_LINE(),
+								error_proc     = ERROR_PROCEDURE()
+						WHERE log_id = @log_id;
+
+						SET @msg = N''FAILED (OFFLINE fallback) '' 
+								 + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+								 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): ''
+								 + LEFT(@CombinedErr, 1500);
+						RAISERROR(@msg, 10, 1) WITH NOWAIT;
+					END CATCH;
                 END
                 ELSE
                 BEGIN
