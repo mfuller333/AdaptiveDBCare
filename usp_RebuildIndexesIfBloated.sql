@@ -48,9 +48,10 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /****** Date Updated: 01/08/2026                                                                            ******/
 /****** Version:     2.1                                                                                    ******/
 /*****************************************************************************************************************/
-CREATE PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
+ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
       @TargetDatabases            NVARCHAR(MAX),            -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
+	  @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
       @MinPageDensityPct          DECIMAL(5,2) = 70.0,
       @MinPageCount               INT          = 1000,
       @UseExistingFillFactor      BIT          = 1,
@@ -290,6 +291,20 @@ BEGIN
         DECLARE @LogDb SYSNAME       = ISNULL(@LogDatabase, @db);
         DECLARE @qLogDb NVARCHAR(258)= QUOTENAME(@LogDb COLLATE DATABASE_DEFAULT);
 
+        /* NEW: capture per-target and per-log collations (used later for cross-db inserts/joins) */
+        DECLARE @DbCollation  SYSNAME;
+        DECLARE @LogCollation SYSNAME;
+
+        SELECT @DbCollation  = d.collation_name FROM sys.databases AS d WHERE d.name = @db;
+        SELECT @LogCollation = d.collation_name FROM sys.databases AS d WHERE d.name = @LogDb;
+
+        IF @DbCollation IS NULL OR @LogCollation IS NULL
+        BEGIN
+            RAISERROR(N'Skipping database [%s]: could not determine target/log collation.', 10, 1, @db) WITH NOWAIT;
+            FETCH NEXT FROM cur INTO @db;
+            CONTINUE;
+        END
+
         -- Ensure log table exists for this target's chosen log DB
         DECLARE @ddl NVARCHAR(MAX) =
         N'USE ' + @qLogDb + N';
@@ -413,6 +428,7 @@ BEGIN
             CONTINUE;
         END CATCH
 
+		
         /* ============================================================================================
            Core per-DB logic with progress
            CHANGE: execution now retries OFFLINE when ONLINE fails for ONLINE-not-supported reasons.
@@ -579,11 +595,28 @@ BEGIN
         )
         OUTPUT inserted.log_id, inserted.cmd INTO #todo(log_id, cmd)
         SELECT
-            database_name, schema_name, table_name, index_name, index_id, partition_number,
-            page_count, page_density_pct, fragmentation_pct,
-            avg_row_bytes, record_count, ghost_record_count, fwd_record_count,
-            au_total_pages, au_used_pages, au_data_pages,
-            chosen_fill_factor, online_on, maxdop_used, [action], cmd, [status]
+            database_name COLLATE <<LOGCOLLATION>>,
+            schema_name   COLLATE <<LOGCOLLATION>>,
+            table_name    COLLATE <<LOGCOLLATION>>,
+            index_name    COLLATE <<LOGCOLLATION>>,
+            index_id,
+            partition_number,
+            page_count,
+            page_density_pct,
+            fragmentation_pct,
+            avg_row_bytes,
+            record_count,
+            ghost_record_count,
+            fwd_record_count,
+            au_total_pages,
+            au_used_pages,
+            au_data_pages,
+            chosen_fill_factor,
+            online_on,
+            maxdop_used,
+            [action] COLLATE <<LOGCOLLATION>>,
+            cmd      COLLATE <<LOGCOLLATION>>,
+            [status] COLLATE <<LOGCOLLATION>>
         FROM to_log;
 
         IF @pWhatIf = 1 OR NOT EXISTS (SELECT 1 FROM #todo)
@@ -617,9 +650,9 @@ BEGIN
         SELECT
             t.log_id,
             t.cmd,
-            l.schema_name COLLATE DATABASE_DEFAULT,
-            l.table_name  COLLATE DATABASE_DEFAULT,
-            l.index_name  COLLATE DATABASE_DEFAULT,
+            l.schema_name COLLATE <<LOGCOLLATION>>,
+            l.table_name  COLLATE <<LOGCOLLATION>>,
+            l.index_name  COLLATE <<LOGCOLLATION>>,
             l.index_id,
             l.partition_number,
             l.page_count,
@@ -630,9 +663,9 @@ BEGIN
         JOIN ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
             ON l.log_id = t.log_id
         JOIN #candidates AS c
-            ON c.schema_name      = l.schema_name COLLATE DATABASE_DEFAULT
-           AND c.table_name       = l.table_name  COLLATE DATABASE_DEFAULT
-           AND c.index_name       = l.index_name  COLLATE DATABASE_DEFAULT
+            ON (c.schema_name COLLATE <<LOGCOLLATION>>) = (l.schema_name COLLATE <<LOGCOLLATION>>)
+           AND (c.table_name  COLLATE <<LOGCOLLATION>>) = (l.table_name  COLLATE <<LOGCOLLATION>>)
+           AND (c.index_name  COLLATE <<LOGCOLLATION>>) = (l.index_name  COLLATE <<LOGCOLLATION>>)
            AND c.index_id         = l.index_id
            AND c.partition_number = l.partition_number
         ORDER BY l.page_density_pct ASC, l.page_count DESC;
@@ -712,9 +745,17 @@ BEGIN
                 /* Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed */
                 IF (@pOnline = 1 AND @pIncludeOnlineOption = 1)
                    AND (
-                          @ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
-                          OR (@ErrMsg LIKE N''%ONLINE%'' AND (@ErrMsg LIKE N''%not allowed%'' OR @ErrMsg LIKE N''%not supported%'' OR @ErrMsg LIKE N''%does not support%'' OR @ErrMsg LIKE N''%cannot%''))
-                       )
+						@ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
+					 OR (
+							(@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%ONLINE%'' COLLATE <<DBCOLLATION>>)
+						AND (
+							   (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not allowed%''    COLLATE <<DBCOLLATION>>)
+							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not supported%''  COLLATE <<DBCOLLATION>>)
+							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%does not support%'' COLLATE <<DBCOLLATION>>)
+							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%cannot%''        COLLATE <<DBCOLLATION>>)
+						   )
+						)
+				   )
                 BEGIN
 					SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
 							 + LEFT(@ErrMsg, 1500)
@@ -746,10 +787,18 @@ BEGIN
 						DECLARE @ErrNum2 INT = ERROR_NUMBER();
 						DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
 
-						DECLARE @CombinedErr NVARCHAR(4000) =
+						DECLARE @CombinedErr NVARCHAR(4000);
+
+						SET @CombinedErr =
 							LEFT(
-								N''ONLINE failed (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): '' + @ErrMsg
-								+ N'' | OFFLINE failed (Error '' + CONVERT(NVARCHAR(12), @ErrNum2) + N''): '' + @ErrMsg2
+								  (N''ONLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+								+ (CONVERT(NVARCHAR(12), @ErrNum) COLLATE <<DBCOLLATION>>)
+								+ (N''): '' COLLATE <<DBCOLLATION>>)
+								+ (@ErrMsg COLLATE <<DBCOLLATION>>)
+								+ (N'' | OFFLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+								+ (CONVERT(NVARCHAR(12), @ErrNum2) COLLATE <<DBCOLLATION>>)
+								+ (N''): '' COLLATE <<DBCOLLATION>>)
+								+ (@ErrMsg2 COLLATE <<DBCOLLATION>>)
 							, 4000);
 
 						UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
@@ -793,6 +842,9 @@ BEGIN
             SET @i += 1;
         END
         ';
+		--change collations
+		SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
+		SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
 
         EXEC sys.sp_executesql
             @sql,
