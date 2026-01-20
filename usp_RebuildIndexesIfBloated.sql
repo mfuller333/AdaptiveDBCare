@@ -21,6 +21,11 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                              *exclusions* prefixed by '-' (e.g. '-DW,-ReportServer')******/
 /******                                              System DBs (master, model, msdb, tempdb) and           ******/
 /******                                              'distribution' are always excluded.                    ******/
+/******              @Indexes                    = (single-target-db only) CSV of indexes or 'ALL_INDEXES'  ******/
+/******                                              Supports exclusions via -[schema].[index] or           ******/
+/******                                              -[schema].[table].[index].                             ******/
+/******                                              If @TargetDatabases uses ALL_USER_DBS or resolves      ******/
+/******                                              to >1 DB, @Indexes is forced to ALL_INDEXES.           ******/
 /******              @MinPageDensityPct          = rebuild when avg page density < this (default 70.0)      ******/
 /******              @MinPageCount               = skip partitions < this many pages (default 1000)         ******/
 /******              @UseExistingFillFactor      = 1 keep per-index fill factor; 0 use @FillFactor          ******/
@@ -45,8 +50,8 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******              3) Rows logged to [DBA].[IndexBloatRebuildLog] with action/status/details.             ******/
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
-/****** Date Updated: 01/08/2026                                                                            ******/
-/****** Version:     2.1                                                                                    ******/
+/****** Date Updated: 01/20/2026                                                                            ******/
+/****** Version:     2.5                                                                                    ******/
 /*****************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
