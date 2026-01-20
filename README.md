@@ -1,5 +1,3 @@
-Show Diff
-
 # AdaptiveDBCare — Multi-Database Index & Statistics Optimization Release
 
 This release of AdaptiveDBCare introduces coordinated, cross-database index-rebuild and statistics-update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-DB routines into a unified, intelligent maintenance engine for large SQL Server estates.
