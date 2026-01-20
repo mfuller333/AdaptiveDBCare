@@ -479,77 +479,77 @@ BEGIN
                   error_proc           NVARCHAR(128)  NULL
               );
           END
-		  
-		  IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NOT NULL
-			BEGIN
-				IF EXISTS
-				(
-					SELECT 1
-					FROM sys.columns
-					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-						AND name = N''cmd''
-						AND system_type_id = 231
-						AND max_length <> -1
-				)
-				BEGIN
-					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
-				END
+           
+          IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NOT NULL
+            BEGIN
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''cmd''
+                        AND system_type_id = 231
+                        AND max_length <> -1
+                )
+                BEGIN
+                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
+                END
 
-				IF EXISTS
-				(
-					SELECT 1
-					FROM sys.columns
-					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-						AND name = N''error_message''
-						AND system_type_id = 231
-						AND max_length > 0
-						AND max_length < 8000
-				)
-				BEGIN
-					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
-				END
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''error_message''
+                        AND system_type_id = 231
+                        AND max_length > 0
+                        AND max_length < 8000
+                )
+                BEGIN
+                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
+                END
 
-				IF EXISTS
-				(
-					SELECT 1
-					FROM sys.columns
-					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-						AND name = N''status''
-						AND system_type_id = 167
-						AND max_length < 30
-				)
-				BEGIN
-					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
-				END
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''status''
+                        AND system_type_id = 167
+                        AND max_length < 30
+                )
+                BEGIN
+                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
+                END
 
-				IF EXISTS
-				(
-					SELECT 1
-					FROM sys.columns
-					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-						AND name = N''action''
-						AND system_type_id = 167
-						AND max_length < 20
-				)
-				BEGIN
-					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
-				END
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''action''
+                        AND system_type_id = 167
+                        AND max_length < 20
+                )
+                BEGIN
+                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
+                END
 
-				IF EXISTS
-				(
-					SELECT 1
-					FROM sys.columns
-					WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-						AND name = N''error_proc''
-						AND system_type_id = 231
-						AND max_length > 0
-						AND max_length < 256
-				)
-				BEGIN
-					ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
-				END
-			END
-			';
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''error_proc''
+                        AND system_type_id = 231
+                        AND max_length > 0
+                        AND max_length < 256
+                )
+                BEGIN
+                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
+                END
+            END
+            ';
 
         BEGIN TRY
             EXEC (@ddl);
@@ -896,23 +896,23 @@ BEGIN
                 -- Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed 
                 IF (@pOnline = 1 AND @pIncludeOnlineOption = 1)
                    AND (
-						@ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
-					 OR (
-							(@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%ONLINE%'' COLLATE <<DBCOLLATION>>)
-						AND (
-							   (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not allowed%''    COLLATE <<DBCOLLATION>>)
-							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not supported%''  COLLATE <<DBCOLLATION>>)
-							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%does not support%'' COLLATE <<DBCOLLATION>>)
-							OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%cannot%''        COLLATE <<DBCOLLATION>>)
-						   )
-						)
-				   )
+                        @ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
+                    OR (
+                            (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%ONLINE%'' COLLATE <<DBCOLLATION>>)
+                        AND (
+                               (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not allowed%''    COLLATE <<DBCOLLATION>>)
+                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not supported%''  COLLATE <<DBCOLLATION>>)
+                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%does not support%'' COLLATE <<DBCOLLATION>>)
+                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%cannot%''        COLLATE <<DBCOLLATION>>)
+                           )
+                        )
+                    )
                 BEGIN
-					SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
-							 + LEFT(@ErrMsg, 1500)
-							 + N'' | retrying OFFLINE for ''
-							 + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-							 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
+                   SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
+                            + LEFT(@ErrMsg, 1500)
+                            + N'' | retrying OFFLINE for ''
+                            + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                            + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
                     ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
                     BEGIN TRY
@@ -934,42 +934,42 @@ BEGIN
                                  + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
                         ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
                     END TRY
-					BEGIN CATCH
-						DECLARE @ErrNum2 INT = ERROR_NUMBER();
-						DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
+                    BEGIN CATCH
+                        DECLARE @ErrNum2 INT = ERROR_NUMBER();
+                        DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
 
-						DECLARE @CombinedErr NVARCHAR(4000);
+                        DECLARE @CombinedErr NVARCHAR(4000);
 
-						SET @CombinedErr =
-							LEFT(
-								  (N''ONLINE failed (Error '' COLLATE <<DBCOLLATION>>)
-								+ (CONVERT(NVARCHAR(12), @ErrNum) COLLATE <<DBCOLLATION>>)
-								+ (N''): '' COLLATE <<DBCOLLATION>>)
-								+ (@ErrMsg COLLATE <<DBCOLLATION>>)
-								+ (N'' | OFFLINE failed (Error '' COLLATE <<DBCOLLATION>>)
-								+ (CONVERT(NVARCHAR(12), @ErrNum2) COLLATE <<DBCOLLATION>>)
-								+ (N''): '' COLLATE <<DBCOLLATION>>)
-								+ (@ErrMsg2 COLLATE <<DBCOLLATION>>)
-							, 4000);
+                        SET @CombinedErr =
+                            LEFT(
+                                (N''ONLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+                              + (CONVERT(NVARCHAR(12), @ErrNum) COLLATE <<DBCOLLATION>>)
+                              + (N''): '' COLLATE <<DBCOLLATION>>)
+                              + (@ErrMsg COLLATE <<DBCOLLATION>>)
+                              + (N'' | OFFLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+                              + (CONVERT(NVARCHAR(12), @ErrNum2) COLLATE <<DBCOLLATION>>)
+                              + (N''): '' COLLATE <<DBCOLLATION>>)
+                              + (@ErrMsg2 COLLATE <<DBCOLLATION>>)
+                            , 4000);
 
-						UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-							SET [status]       = ''FAILED_OFFLINE_FALLBACK'',
-								online_on      = 0,
-								cmd            = @cmdOffline,
-								error_message  = @CombinedErr,
-								error_number   = @ErrNum2,
-								error_severity = ERROR_SEVERITY(),
-								error_state    = ERROR_STATE(),
-								error_line     = ERROR_LINE(),
-								error_proc     = ERROR_PROCEDURE()
-						WHERE log_id = @log_id;
+                        UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
+                            SET [status]       = ''FAILED_OFFLINE_FALLBACK'',
+                                online_on      = 0,
+                                cmd            = @cmdOffline,
+                                error_message  = @CombinedErr,
+                                error_number   = @ErrNum2,
+                                error_severity = ERROR_SEVERITY(),
+                                error_state    = ERROR_STATE(),
+                                error_line     = ERROR_LINE(),
+                                error_proc     = ERROR_PROCEDURE()
+                        WHERE log_id = @log_id;
 
-						SET @msg = N''FAILED (OFFLINE fallback) '' 
-								 + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-								 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): ''
-								 + LEFT(@CombinedErr, 1500);
-						RAISERROR(@msg, 10, 1) WITH NOWAIT;
-					END CATCH;
+                        SET @msg = N''FAILED (OFFLINE fallback) '' 
+                              + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                              + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): ''
+                              + LEFT(@CombinedErr, 1500);
+                        RAISERROR(@msg, 10, 1) WITH NOWAIT;
+                    END CATCH;
                 END
                 ELSE
                 BEGIN
