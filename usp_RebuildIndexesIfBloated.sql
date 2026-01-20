@@ -56,7 +56,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
       @TargetDatabases            NVARCHAR(MAX),            -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
-	  @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
+      @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
       @MinPageDensityPct          DECIMAL(5,2) = 70.0,
       @MinPageCount               INT          = 1000,
       @UseExistingFillFactor      BIT          = 1,
@@ -87,7 +87,7 @@ BEGIN
             param_name, sql_type, default_value, description, example
         FROM (VALUES
               (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer''')
-			, (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne''')
+            , (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne''')
             , (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0')
             , (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.',                                                                 N'500')
             , (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1')
