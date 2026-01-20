@@ -51,7 +51,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
 /****** Date Updated: 01/20/2026                                                                            ******/
-/****** Version:     2.5                                                                                    ******/
+/****** Version:     2.8                                                                                    ******/
 /*****************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
@@ -209,12 +209,30 @@ BEGIN
     END
 
     -- Parse targets
-    IF OBJECT_ID('tempdb..#includes') IS NOT NULL DROP TABLE #includes;
-    IF OBJECT_ID('tempdb..#excludes') IS NOT NULL DROP TABLE #excludes;
-    IF OBJECT_ID('tempdb..#targets')  IS NOT NULL DROP TABLE #targets;
+    IF OBJECT_ID('tempdb..#includes')       IS NOT NULL DROP TABLE #includes;
+    IF OBJECT_ID('tempdb..#excludes')       IS NOT NULL DROP TABLE #excludes;
+    IF OBJECT_ID('tempdb..#targets')        IS NOT NULL DROP TABLE #targets;
+    IF OBJECT_ID('tempdb..#IndexIncludes')  IS NOT NULL DROP TABLE #IndexIncludes;
+    IF OBJECT_ID('tempdb..#IndexExcludes')  IS NOT NULL DROP TABLE #IndexExcludes;
+
     CREATE TABLE #includes (name SYSNAME NOT NULL PRIMARY KEY);
     CREATE TABLE #excludes (name SYSNAME NOT NULL PRIMARY KEY);
     CREATE TABLE #targets  (db_name SYSNAME NOT NULL PRIMARY KEY);
+
+    -- @Indexes include / exclude filters (single-target DB only)
+    CREATE TABLE #IndexIncludes
+    (
+        schema_name SYSNAME NULL,
+        table_name  SYSNAME NULL,
+        index_name  SYSNAME NOT NULL
+    );
+
+    CREATE TABLE #IndexExcludes
+    (
+        schema_name SYSNAME NULL,
+        table_name  SYSNAME NULL,
+        index_name  SYSNAME NOT NULL
+    );
 
     DECLARE @list NVARCHAR(MAX) = @TargetDatabases + N',';
     DECLARE @pos INT, @tok NVARCHAR(4000), @AllUsers BIT = 0;
@@ -275,7 +293,117 @@ BEGIN
         RAISERROR('No valid target databases resolved after parsing @TargetDatabases.',16,1);
         RETURN;
     END
+    DECLARE @TargetCount INT = (SELECT COUNT(*) FROM #targets);
 
+    IF @TargetCount > 1
+    BEGIN
+        IF @Indexes IS NOT NULL
+           AND LTRIM(RTRIM(@Indexes)) <> N''
+           AND UPPER(LTRIM(RTRIM(@Indexes))) <> N'ALL_INDEXES'
+        BEGIN
+            RAISERROR('@Indexes parameter is ignored when more than one target database is selected; using ALL_INDEXES.', 10, 1) WITH NOWAIT;
+        END;
+
+        SET @Indexes = N'ALL_INDEXES';
+    END;
+
+    DECLARE @idxList NVARCHAR(MAX) = LTRIM(RTRIM(ISNULL(@Indexes, N'')));
+
+    IF @TargetCount = 1 AND @idxList <> N''
+    BEGIN
+        SET @idxList = @idxList + N',';
+
+        DECLARE
+            @idxPos   INT,
+            @idxTok   NVARCHAR(4000),
+            @isExcl   BIT,
+            @raw      NVARCHAR(4000),
+            @schema   SYSNAME,
+            @table    SYSNAME,
+            @index    SYSNAME,
+            @dot1     INT,
+            @dot2     INT;
+
+        WHILE LEN(@idxList) > 0
+        BEGIN
+            SET @idxPos = CHARINDEX(N',', @idxList);
+            SET @idxTok = LTRIM(RTRIM(SUBSTRING(@idxList, 1, @idxPos-1)));
+            SET @idxList = SUBSTRING(@idxList, @idxPos+1, 2147483647);
+
+            IF @idxTok = N'' CONTINUE;
+
+            -- Ignore standalone ALL_INDEXES token (means "no filter")
+            IF UPPER(@idxTok) = N'ALL_INDEXES'
+                CONTINUE;
+
+            SET @isExcl = CASE WHEN LEFT(@idxTok,1) = N'-' THEN 1 ELSE 0 END;
+            IF @isExcl = 1
+                SET @idxTok = LTRIM(RTRIM(SUBSTRING(@idxTok,2,4000)));
+
+            IF @idxTok = N'' CONTINUE;
+
+            SET @raw = @idxTok;
+
+            -- Split into up to 3 parts: schema[.table].index
+            SET @dot1 = CHARINDEX(N'.', @raw);
+            SET @dot2 = CASE WHEN @dot1 > 0 THEN CHARINDEX(N'.', @raw, @dot1+1) ELSE 0 END;
+
+            SET @schema = NULL;
+            SET @table  = NULL;
+            SET @index  = NULL;
+
+            IF @dot1 = 0
+            BEGIN
+                -- just index name
+                SET @index = @raw;
+            END
+            ELSE IF @dot2 = 0
+            BEGIN
+                -- schema.index
+                SET @schema = SUBSTRING(@raw, 1, @dot1-1);
+                SET @index  = SUBSTRING(@raw, @dot1+1, 4000);
+            END
+            ELSE
+            BEGIN
+                -- schema.table.index
+                SET @schema = SUBSTRING(@raw, 1, @dot1-1);
+                SET @table  = SUBSTRING(@raw, @dot1+1, @dot2-@dot1-1);
+                SET @index  = SUBSTRING(@raw, @dot2+1, 4000);
+            END;
+
+            -- Strip brackets
+            SET @schema = NULLIF(REPLACE(REPLACE(@schema, N'[', N''), N']', N''), N'');
+            SET @table  = NULLIF(REPLACE(REPLACE(@table,  N'[', N''), N']', N''), N'');
+            SET @index  = NULLIF(REPLACE(REPLACE(@index,  N'[', N''), N']', N''), N'');
+
+            IF @index IS NULL CONTINUE;
+
+            IF @isExcl = 1
+            BEGIN
+                IF NOT EXISTS (SELECT 1
+                               FROM #IndexExcludes
+                               WHERE schema_name = @schema
+                                 AND table_name  = @table
+                                 AND index_name  = @index)
+                BEGIN
+                    INSERT #IndexExcludes(schema_name, table_name, index_name)
+                    VALUES(@schema, @table, @index);
+                END
+            END
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT 1
+                               FROM #IndexIncludes
+                               WHERE schema_name = @schema
+                                 AND table_name  = @table
+                                 AND index_name  = @index)
+                BEGIN
+                    INSERT #IndexIncludes(schema_name, table_name, index_name)
+                    VALUES(@schema, @table, @index);
+                END
+            END
+        END
+    END;
     -- Iterate per target DB
     DECLARE @db SYSNAME;
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT db_name FROM #targets ORDER BY db_name;
@@ -563,6 +691,26 @@ BEGIN
             AND ps.avg_page_space_used_in_percent < @pMinPageDensityPct
             AND t.is_ms_shipped = 0
             AND t.is_memory_optimized = 0
+            -- Optional @Indexes include / exclude filtering (single-target DB only)
+            AND (
+                    NOT EXISTS (SELECT 1 FROM #IndexIncludes)
+                 OR EXISTS
+                    (
+                        SELECT 1
+                        FROM #IndexIncludes AS inc
+                        WHERE (inc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)
+                          AND (inc.schema_name IS NULL OR (inc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))
+                          AND (inc.table_name  IS NULL OR (inc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
+                    )
+                )
+            AND NOT EXISTS
+                (
+                    SELECT 1
+                    FROM #IndexExcludes AS exc
+                    WHERE (exc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)
+                      AND (exc.schema_name IS NULL OR (exc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))
+                      AND (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
+                )
             AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
         GROUP BY
             s.name, t.name, i.name, i.index_id, ps.partition_number, ps.page_count,
@@ -899,4 +1047,3 @@ BEGIN
     CLOSE cur; DEALLOCATE cur;
 END
 GO
-
