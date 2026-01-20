@@ -563,11 +563,9 @@ BEGIN
         END CATCH
 
 		
-        /* ============================================================================================
-           Core per-DB logic with progress
-           CHANGE: execution now retries OFFLINE when ONLINE fails for ONLINE-not-supported reasons.
-           SQL 2014 compatible (no RESUMABLE usage unless the cmd includes it; fallback ignores that path).
-           ============================================================================================ */
+        --Core per-DB logic with progress
+        --CHANGE: execution now retries OFFLINE when ONLINE fails for ONLINE-not-supported reasons.
+        --SQL 2014 compatible (no RESUMABLE usage unless the cmd includes it; fallback ignores that path).
         DECLARE @sql NVARCHAR(MAX) =
         N'USE ' + @qDb + N';
         SET NOCOUNT ON;
@@ -776,9 +774,8 @@ BEGIN
         IF @pWhatIf = 1 OR NOT EXISTS (SELECT 1 FROM #todo)
             RETURN;
 
-        /* ============================
-           EXECUTION with OFFLINE fallback
-           ============================ */
+        
+        --EXECUTION with OFFLINE fallback
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
         (
@@ -870,7 +867,7 @@ BEGIN
                      + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
-            /* Build OFFLINE command (no ONLINE clause, no resumable clause) */
+            -- Build OFFLINE command (no ONLINE clause, no resumable clause)
             SET @cmdOffline =
                 N''ALTER INDEX '' + QUOTENAME(@index) +
                 N'' ON '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) +
@@ -896,7 +893,7 @@ BEGIN
                 DECLARE @ErrNum INT = ERROR_NUMBER();
                 DECLARE @ErrMsg NVARCHAR(4000) = ERROR_MESSAGE();
 
-                /* Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed */
+                -- Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed 
                 IF (@pOnline = 1 AND @pIncludeOnlineOption = 1)
                    AND (
 						@ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
@@ -1046,4 +1043,3 @@ BEGIN
 
     CLOSE cur; DEALLOCATE cur;
 END
-GO
