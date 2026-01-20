@@ -86,25 +86,26 @@ BEGIN
         SELECT
             param_name, sql_type, default_value, description, example
         FROM (VALUES
-              (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',     N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer''')
-            , (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',           N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0')
-            , (N'@MinPageCount',             N'INT',            N'1000',           N'Skip tiny partitions below this page count.',                                                                 N'500')
-            , (N'@UseExistingFillFactor',    N'BIT',            N'1',              N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1')
-            , (N'@FillFactor',               N'TINYINT',        N'NULL',           N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.',                                                N'90')
-            , (N'@Online',                   N'BIT',            N'1',              N'Use ONLINE = ON when supported.',                                                                              N'1')
-            , (N'@MaxDOP',                   N'INT',            N'NULL',           N'MAXDOP for rebuilds. If NULL, server default is used.',                                                       N'4')
-            , (N'@SortInTempdb',             N'BIT',            N'1',              N'Use SORT_IN_TEMPDB.',                                                                                          N'1')
-            , (N'@UseCompressionFromSource', N'BIT',            N'1',              N'Preserve DATA_COMPRESSION of each partition when supported.',                                                  N'1')
-            , (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',           N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).',                                 N'N''ROW''')
-            , (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',    N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.',                                                        N'''DETAILED''')
-            , (N'@CaptureTrendingSignals',   N'BIT',            N'0',              N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.',               N'1')
-            , (N'@LogDatabase',              N'SYSNAME',        N'NULL',           N'Central log DB. If NULL, logs in each target DB.',                                                             N'N''UtilityDb''')
-            , (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',           N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).',                                                    N'5')
-            , (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',           N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).',                                                N'N''BLOCKERS''')
-            , (N'@Resumable',                N'BIT',            N'0',              N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).',                                               N'1')
-            , (N'@MaxDurationMinutes',       N'INT',            N'NULL',           N'Resumable MAX_DURATION minutes.',                                                                              N'60')
-            , (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',           N'Optional delay between commands in milliseconds.',                                                             N'5000')
-            , (N'@WhatIf',                   N'BIT',            N'1',              N'Dry run: log/print only.',                                                                                     N'0')
+              (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer''')
+			, (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne''')
+            , (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0')
+            , (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.',                                                                 N'500')
+            , (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1')
+            , (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.',                                                N'90')
+            , (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.',                                                                              N'1')
+            , (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.',                                                       N'4')
+            , (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.',                                                                                          N'1')
+            , (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.',                                                  N'1')
+            , (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).',                                 N'N''ROW''')
+            , (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.',                                                        N'''DETAILED''')
+            , (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.',               N'1')
+            , (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.',                                                             N'N''UtilityDb''')
+            , (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).',                                                    N'5')
+            , (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).',                                                N'N''BLOCKERS''')
+            , (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).',                                               N'1')
+            , (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.',                                                                              N'60')
+            , (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.',                                                             N'5000')
+            , (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.',                                                                                     N'0')
         ) d(param_name, sql_type, default_value, description, example)
         ORDER BY param_name;
 
@@ -898,3 +899,4 @@ BEGIN
     CLOSE cur; DEALLOCATE cur;
 END
 GO
+
