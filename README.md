@@ -1,86 +1,92 @@
+---
+
 # AdaptiveDBCare — Multi-Database Index & Statistics Optimization Release
 
-This release of AdaptiveDBCare introduces coordinated, cross-database index-rebuild and statistics-update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-DB routines into a unified, intelligent maintenance engine for large SQL Server estates.
+This release of AdaptiveDBCare introduces coordinated, cross-database index rebuild and statistics update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-database routines into a unified, intelligent maintenance engine for large SQL Server estates.
 
-# DBA.usp_RebuildIndexesIfBloated (v**2.8**, 2026-01-20)
+---
+
+# DBA.usp_RebuildIndexesIfBloated (v**2.9**, 2026-01-20)
 
 ---
 
 Rebuild **only** what’s bloated. This procedure finds leaf-level **rowstore** index partitions whose **avg_page_space_used_in_percent** is below a threshold, then rebuilds just those partitions, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
 
-> **Works on SQL Server 2014–2025.** ONLINE/RESUMABLE features auto-downgrade based on edition/version (Enterprise/Developer/Evaluation for ONLINE; SQL 2019+ for RESUMABLE). Defaults to safe **WhatIf** mode.
+> **Works on SQL Server 2014–2025.** ONLINE/RESUMABLE features auto-downgrade based on edition and version (Enterprise/Developer/Evaluation for ONLINE; SQL 2019+ for RESUMABLE). Defaults to safe **WhatIf** mode.
 
 ---
 
-## What’s new in 2.8
+## What’s new in 2.9
 
-* **Index targeting for single-DB runs** via `@Indexes`
-  Supports:
+* **Compression override honored during OFFLINE fallback**
+  In v2.8, if an ONLINE rebuild failed and the procedure retried OFFLINE, the OFFLINE command always reused the partition’s existing compression.
+  In v2.9, OFFLINE fallback now fully honors the caller’s intent:
 
-  * `ALL_INDEXES` (default)
-  * CSV tokens: `schema.index` or `schema.table.index` (brackets ok)
-  * Exclusions by prefixing `-` (e.g., `-dbo.MyTable.IX_DoNotTouch`)
-    If `@TargetDatabases` resolves to **more than one DB** (including `ALL_USER_DBS`), `@Indexes` is **forced to ALL_INDEXES** and a severity 10 message is printed.
+  * `@UseCompressionFromSource = 1` → preserves partition compression
+  * `@UseCompressionFromSource = 0` + `@ForceCompression = NONE | ROW | PAGE` → applies the forced compression even during OFFLINE fallback
 
-* **Collation-safe operation for central logging**
-  When `@LogDatabase` is used, the proc captures **target DB collation** and **log DB collation** per iteration and applies explicit `COLLATE` rules during:
+  ONLINE success and OFFLINE fallback now produce **identical compression outcomes**.
 
-  * include/exclude filtering comparisons
-  * inserts into the central log table
-  * joins between log rows and candidates
-    This prevents collation-conflict failures when DBs have different collations.
+* **OFFLINE fallback command logic aligned with ONLINE**
+  OFFLINE rebuild commands now follow the same decision path as ONLINE rebuilds for:
 
-* **ONLINE-first with OFFLINE fallback (smarter and louder)**
-  If an ONLINE rebuild fails for “ONLINE not allowed/supported” reasons (by error number and/or message patterns), the proc:
+  * compression source vs override
+  * fill factor selection
+  * `MAXDOP`
+  * `SORT_IN_TEMPDB`
 
-  * prints the **original ONLINE error** (number + message)
-  * retries the rebuild **OFFLINE**
-  * logs the final outcome accurately:
+  This eliminates behavioral drift between first attempt and retry.
 
-    * `SUCCESS` (ONLINE worked)
-    * `SUCCESS_OFFLINE_FALLBACK` (OFFLINE saved the day)
-    * `FAILED` (non-ONLINE-related failure)
-    * `FAILED_OFFLINE_FALLBACK` (both ONLINE and OFFLINE failed)
+* **Documentation clarity around compression support**
+  The feature and safeguard sections now explicitly document that when compression is unsupported at the server level, compression options are disabled and only uncompressed partitions are eligible.
 
-* **Logging table schema enforcement for older deployments**
-  When `[DBA].[IndexBloatRebuildLog]` already exists, v2.8 validates and auto-corrects legacy column definitions that commonly cause retry-path failures (like truncation), enforcing:
-
-  * `cmd` = `NVARCHAR(MAX)`
-  * `error_message` = `NVARCHAR(4000)`
-  * `status` = `VARCHAR(30)`
-  * `action` = `VARCHAR(20)`
-  * `error_proc` = `NVARCHAR(128)`
-
-* **OFFLINE command generation tightened**
-  OFFLINE fallback builds a clean command that omits ONLINE/RESUMABLE options and constrains compression text (`LEFT(@comp, 60)`) to avoid edge-case formatting issues.
-
-* **Trending signals seatbelt preserved**
-  `@CaptureTrendingSignals = 1` auto-upshifts `SAMPLED` to `DETAILED` to ensure reliable row/ghost/forwarded and AU page metrics.
+No breaking changes. No behavioral regressions. Existing automation continues to work as-is.
 
 ---
 
 ## Why this exists
 
-* **Page density pays the rent** especially on SSD/NVMe. Logical fragmentation doesn’t show up on your invoice.
+* **Page density pays the rent** especially on SSD and NVMe. Logical fragmentation does not show up on your invoice.
 * **Surgical partitions**: touch only the slices that need it; stop hammering every index every time.
-* **Receipts or it didn’t happen**: every candidate, command, and result is logged for audit and trending.
+* **Receipts or it didn’t happen**: every candidate, command, and outcome is logged for audit, tuning, and trending.
 
 ---
 
 ## Features
 
-* Targets **rowstore** only (clustered & nonclustered), **leaf level**.
-* Leaves tiny partitions alone via `@MinPageCount`.
-* **Partition-aware**: rebuilds specific partitions only.
-* **ONLINE = ON** with optional `WAIT_AT_LOW_PRIORITY (MAX_DURATION, ABORT_AFTER_WAIT)`.
-* **RESUMABLE** (SQL 2019+, ONLINE only); auto-disabled at server level when unsupported.
-* **Compression**: preserve from source or force `NONE | ROW | PAGE`; auto-disabled if not supported on the server.
-* **Fill factor**: preserve per index or set a global `@FillFactor`.
-* **MaxDOP**: honor server default when NULL; you can explicitly set `0` (unlimited) or a specific value.
-* **SORT_IN_TEMPDB**: ON by default; automatically **OFF** when RESUMABLE is used (engine limitation).
-* **Index filtering (single DB only)** via `@Indexes` include/exclude tokens.
-* **Full logging** to `[DBA].[IndexBloatRebuildLog]` in a target DB or a central log DB.
-* Captures trending signals: `avg_row_bytes`, `record_count`, `ghost_record_count`, `forwarded_record_count`, AU pages (`au_total_pages`, `au_used_pages`, `au_data_pages`).
+* Targets **rowstore** indexes only (clustered and nonclustered), **leaf level**.
+* Skips tiny partitions via `@MinPageCount`.
+* **Partition-aware**: rebuilds only affected partitions, not entire indexes.
+* **ONLINE = ON** when supported, with optional `WAIT_AT_LOW_PRIORITY (MAX_DURATION, ABORT_AFTER_WAIT)`.
+* **OFFLINE fallback** when ONLINE is not allowed or supported.
+* **RESUMABLE** rebuilds (SQL Server 2019+, ONLINE only); auto-disabled when unsupported.
+* **Compression control**:
+
+  * preserve from source, or
+  * force `NONE`, `ROW`, or `PAGE`
+  * auto-disabled if unsupported on the server
+* **Fill factor**:
+
+  * preserve per index, or
+  * enforce a global `@FillFactor`
+* **MaxDOP**:
+
+  * NULL honors server default
+  * `0` allows unlimited
+  * explicit values supported
+* **SORT_IN_TEMPDB**:
+
+  * ON by default
+  * automatically OFF when RESUMABLE is used (engine limitation)
+* **Index filtering (single DB only)** via `@Indexes` include and exclude tokens.
+* **Central or per-DB logging** to `[DBA].[IndexBloatRebuildLog]`.
+* Captures trending signals:
+
+  * `avg_row_bytes`
+  * `record_count`
+  * `ghost_record_count`
+  * `forwarded_record_count`
+  * allocation unit pages (`au_total_pages`, `au_used_pages`, `au_data_pages`)
 * Defaults to **WhatIf** (dry run).
 
 ---
@@ -88,57 +94,64 @@ Rebuild **only** what’s bloated. This procedure finds leaf-level **rowstore** 
 ## Compatibility
 
 * **SQL Server**: 2014–2025
-* **ONLINE**: Enterprise, Developer, Evaluation
-* **RESUMABLE**: SQL Server 2019+ **and** ONLINE
-* **Compression**: auto-detects support; preserves or overrides accordingly
+* **ONLINE rebuilds**: Enterprise, Developer, Evaluation
+* **RESUMABLE rebuilds**: SQL Server 2019+ and ONLINE
+* **Compression**: auto-detected per server and edition
 
-The procedure self-detects edition/version and quietly downgrades options it can’t safely use.
+The procedure self-detects engine capabilities and quietly disables unsafe options.
 
 ---
 
 ## Installation
 
-1. Ensure the `DBA` schema exists (the proc will create it if needed).
-2. Deploy the procedure once, typically into a Utility/DBA database for central use.
-3. First execution ensures `[DBA].[IndexBloatRebuildLog]` exists **in either the target DB** or a central **Log DB** you choose via `@LogDatabase`.
-   If the log table already exists, v2.8 will **enforce compatible column widths** for key text columns used by retries and error logging.
+1. Ensure the `DBA` schema exists (created automatically if missing).
+2. Deploy the procedure once, typically into a Utility or DBA database.
+3. First execution ensures `[DBA].[IndexBloatRebuildLog]` exists in either:
 
-> Deploy once; call it for any user database(s). Choose to log in the target or a central Utility DB.
+   * the target database, or
+   * a central log database specified via `@LogDatabase`.
+
+If the log table already exists, v2.9 enforces compatible column widths to prevent retry and error-path failures.
+
+> Deploy once. Run anywhere. Log centrally or locally.
 
 ---
 
 ## Parameters
 
-| Parameter                   | Type          |       Default | Notes                                                                                                                                     |
-| --------------------------- | ------------- | ------------: | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `@Help`                     | BIT           |             0 | `1` prints help, capabilities, and examples; returns without scanning.                                                                    |
-| `@TargetDatabases`          | NVARCHAR(MAX) |  **required** | CSV list or `ALL_USER_DBS` (exact case), with exclusions using `-DbName`. System DBs and `distribution` are always excluded.              |
-| `@Indexes`                  | NVARCHAR(MAX) | `ALL_INDEXES` | **Single DB only.** CSV allow/deny list: `schema.index` or `schema.table.index`; exclusions with `-`. Forced to `ALL_INDEXES` when >1 DB. |
-| `@MinPageDensityPct`        | DECIMAL(5,2)  |          70.0 | Rebuild when leaf partition density is below this percent.                                                                                |
-| `@MinPageCount`             | INT           |          1000 | Skip partitions smaller than this page count.                                                                                             |
-| `@UseExistingFillFactor`    | BIT           |             1 | Keep each index’s fill factor.                                                                                                            |
-| `@FillFactor`               | TINYINT       |          NULL | Used only when `@UseExistingFillFactor = 0`. (1–100)                                                                                      |
-| `@Online`                   | BIT           |             1 | ONLINE when edition supports it; otherwise auto-disabled. Includes OFFLINE fallback on ONLINE-not-allowed failures.                       |
-| `@MaxDOP`                   | INT           |          NULL | If NULL, uses server default. May pass `0` or a specific DOP.                                                                             |
-| `@SortInTempdb`             | BIT           |             1 | `RESUMABLE=ON` forces this OFF automatically.                                                                                             |
-| `@UseCompressionFromSource` | BIT           |             1 | Preserve `DATA_COMPRESSION` per partition when supported.                                                                                 |
-| `@ForceCompression`         | NVARCHAR(20)  |          NULL | `NONE`, `ROW`, or `PAGE` when not preserving.                                                                                             |
-| `@SampleMode`               | VARCHAR(16)   |     `SAMPLED` | `SAMPLED` or `DETAILED`.                                                                                                                  |
-| `@CaptureTrendingSignals`   | BIT           |             0 | If `1` and `SAMPLED`, auto-upshifts to `DETAILED`.                                                                                        |
-| `@LogDatabase`              | SYSNAME       |          NULL | If set, logs to this DB instead of the target DB. Collation-safe in v2.8.                                                                 |
-| `@WaitAtLowPriorityMinutes` | INT           |          NULL | With ONLINE, enables `WAIT_AT_LOW_PRIORITY (MAX_DURATION)`.                                                                               |
-| `@AbortAfterWait`           | NVARCHAR(20)  |          NULL | `NONE`, `SELF`, or `BLOCKERS` (requires minutes).                                                                                         |
-| `@Resumable`                | BIT           |             0 | RESUMABLE rebuilds (SQL 2019+, ONLINE required).                                                                                          |
-| `@MaxDurationMinutes`       | INT           |          NULL | RESUMABLE `MAX_DURATION`.                                                                                                                 |
-| `@DelayMsBetweenCommands`   | INT           |          NULL | Optional wait between rebuild commands (ms).                                                                                              |
-| `@WhatIf`                   | BIT           |             1 | Dry run by default.                                                                                                                       |
+| Parameter                   | Type          | Default       | Notes                                                                                                                                                                 |
+| --------------------------- | ------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@Help`                     | BIT           | 0             | `1` prints help, capabilities, and examples; returns without scanning.                                                                                                |
+| `@TargetDatabases`          | NVARCHAR(MAX) | **required**  | CSV list or `ALL_USER_DBS` with exclusions using `-DbName`. System DBs and `distribution` are always excluded.                                                        |
+| `@Indexes`                  | NVARCHAR(MAX) | `ALL_INDEXES` | **Single DB only.** CSV allow/deny list using `schema.index` or `schema.table.index`; exclusions with `-`. Forced to `ALL_INDEXES` when more than one DB is targeted. |
+| `@MinPageDensityPct`        | DECIMAL(5,2)  | 70.0          | Rebuild when leaf partition density is below this percent.                                                                                                            |
+| `@MinPageCount`             | INT           | 1000          | Skip partitions smaller than this page count.                                                                                                                         |
+| `@UseExistingFillFactor`    | BIT           | 1             | Preserve each index’s fill factor.                                                                                                                                    |
+| `@FillFactor`               | TINYINT       | NULL          | Used only when `@UseExistingFillFactor = 0`. Valid range 1–100.                                                                                                       |
+| `@Online`                   | BIT           | 1             | ONLINE when supported; OFFLINE fallback when not.                                                                                                                     |
+| `@MaxDOP`                   | INT           | NULL          | NULL uses server default; `0` or explicit values allowed.                                                                                                             |
+| `@SortInTempdb`             | BIT           | 1             | Automatically forced OFF when RESUMABLE is enabled.                                                                                                                   |
+| `@UseCompressionFromSource` | BIT           | 1             | Preserve partition compression when supported.                                                                                                                        |
+| `@ForceCompression`         | NVARCHAR(20)  | NULL          | `NONE`, `ROW`, or `PAGE` when not preserving.                                                                                                                         |
+| `@SampleMode`               | VARCHAR(16)   | `SAMPLED`     | `SAMPLED` or `DETAILED`.                                                                                                                                              |
+| `@CaptureTrendingSignals`   | BIT           | 0             | If `1` and `SAMPLED`, auto-upshifts to `DETAILED`.                                                                                                                    |
+| `@LogDatabase`              | SYSNAME       | NULL          | Central log DB; defaults to target DB when NULL.                                                                                                                      |
+| `@WaitAtLowPriorityMinutes` | INT           | NULL          | Enables `WAIT_AT_LOW_PRIORITY (MAX_DURATION)`.                                                                                                                        |
+| `@AbortAfterWait`           | NVARCHAR(20)  | NULL          | `NONE`, `SELF`, or `BLOCKERS`.                                                                                                                                        |
+| `@Resumable`                | BIT           | 0             | SQL Server 2019+; requires ONLINE.                                                                                                                                    |
+| `@MaxDurationMinutes`       | INT           | NULL          | RESUMABLE `MAX_DURATION`.                                                                                                                                             |
+| `@DelayMsBetweenCommands`   | INT           | NULL          | Optional delay between rebuilds in milliseconds.                                                                                                                      |
+| `@WhatIf`                   | BIT           | 1             | Dry run by default.                                                                                                                                                   |
 
-### Important safeguards
+---
+
+## Important safeguards
 
 * `@SampleMode` accepts only `SAMPLED` or `DETAILED`.
-* `RESUMABLE` requires `@Online = 1` and SQL Server 2019+ (server-level auto-disable when unsupported).
-* If ONLINE isn’t supported on the edition, ONLINE options (and related low-priority waits) are disabled.
-* If compression isn’t supported, compression options are disabled and only uncompressed partitions are considered.
+* RESUMABLE requires ONLINE and SQL Server 2019+.
+* ONLINE options are auto-disabled when unsupported.
+* Compression options are auto-disabled when unsupported.
+* When compression is unsupported, only uncompressed partitions are considered.
 
 ---
 
@@ -150,16 +163,7 @@ The procedure self-detects edition/version and quietly downgrades options it can
 EXEC DBA.usp_RebuildIndexesIfBloated @Help = 1;
 ```
 
-
-## Quick start
-
-### Help / cheatsheet
-
-```sql
-EXEC DBA.usp_RebuildIndexesIfBloated @Help = 1;
-````
-
-### Dry run across all user DBs
+### Dry run across all user databases
 
 ```sql
 EXEC DBA.usp_RebuildIndexesIfBloated
@@ -167,7 +171,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
     @WhatIf          = 1;
 ```
 
-### All user DBs except DW & SSRS, log centrally, execute
+### All user DBs except DW and SSRS, central log, execute
 
 ```sql
 EXEC DBA.usp_RebuildIndexesIfBloated
@@ -186,7 +190,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
     @WhatIf          = 0;
 ```
 
-### One database, only specific indexes (and exclude one)
+### One database, specific indexes only
 
 ```sql
 EXEC DBA.usp_RebuildIndexesIfBloated
@@ -216,7 +220,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
     @WhatIf                   = 0;
 ```
 
-### Resumable with MAX_DURATION (SQL 2019+)
+### Resumable rebuild with MAX_DURATION (SQL 2019+)
 
 ```sql
 EXEC DBA.usp_RebuildIndexesIfBloated
@@ -231,59 +235,58 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 ## Output & logging
 
-* **Messages**: per-DB `STARTING` / per-index rebuild messages / per-DB `COMPLETED`.
-* **Log table**: `[DBA].[IndexBloatRebuildLog]` gets one row per candidate/action with:
+* **Messages**:
 
-  * Identity: `database_name, schema_name, table_name, index_name, index_id, partition_number`
-  * Metrics: `page_count, page_density_pct, fragmentation_pct, avg_row_bytes, record_count, ghost_record_count, forwarded_record_count`
-  * AU pages: `au_total_pages, au_used_pages, au_data_pages`
-  * Options: `chosen_fill_factor, online_on, maxdop_used`
-  * Action & status: `DRYRUN/REBUILD` and `SKIPPED/PENDING/SUCCESS/FAILED/SUCCESS_OFFLINE_FALLBACK/FAILED_OFFLINE_FALLBACK`
-  * `cmd` text and full error metadata on failures
-* **Schema hardening**: if the log table is an older deployment, v2.8 enforces key text column widths so retry/error paths don’t fail due to truncation.
+  * per-DB STARTING and COMPLETED
+  * per-index rebuild progress
+
+* **Log table**: `[DBA].[IndexBloatRebuildLog]`
+
+  * Identity: database, schema, table, index, partition
+  * Metrics: density, fragmentation, row and ghost counts, AU pages
+  * Options used: fill factor, ONLINE, MAXDOP
+  * Action and status:
+
+    * `DRYRUN`
+    * `SUCCESS`
+    * `FAILED`
+    * `SUCCESS_OFFLINE_FALLBACK`
+    * `FAILED_OFFLINE_FALLBACK`
+  * Full command text and error metadata
+
+* **Schema hardening**: legacy deployments are auto-corrected for text column widths.
 
 ---
 
 ## Operational notes
 
-* **Central log collation**: if `@LogDatabase` collation differs from a target DB, v2.8 explicitly collates inserts/joins/comparisons so the run doesn’t blow up mid-flight.
-* **tempdb/version store**: ONLINE + `SORT_IN_TEMPDB = ON` pushes work to tempdb and version store; RESUMABLE implicitly forces `SORT_IN_TEMPDB = OFF`.
-* **Transaction log**: rebuilds are fully logged; ensure primaries/secondaries can keep up.
-* **Extent ordering**: if you require strictly ordered allocation, set `@MaxDOP = 1`.
+* Central log collation is handled explicitly to avoid runtime failures.
+* ONLINE rebuilds consume version store and tempdb.
+* All rebuilds are fully logged; plan log space accordingly.
+* For strict extent ordering, use `@MaxDOP = 1`.
 
 ---
 
 ## Known limitations
 
-* Rowstore only; columnstore is out of scope.
+* Rowstore only; columnstore excluded.
 * Memory-optimized tables are skipped.
-* If an ONLINE rebuild fails for reasons unrelated to ONLINE support, no OFFLINE retry is attempted (by design).
+* OFFLINE fallback triggers only for ONLINE-not-supported failures by design.
 
 ---
 
 ## Versioning
 
-* **Version**: 2.8
+* **Version**: 2.9
 * **Last updated**: 2026-01-20
 
-See the procedure header for exact parameter list and capability checks.
-
 ---
 
-## Contributing
+## Credit
 
-Issues and PRs welcome. Please include:
+Created by **Mike Fuller**.
 
-* Exact SQL Server version and edition
-* Execution parameters used
-* Snippets from `[DBA].[IndexBloatRebuildLog]` for failing cases
-* If relevant, `sys.dm_db_index_physical_stats` output for the affected index
-
----
-
-## License
-
-MIT. Do good things. Rebuild responsibly.
+MIT licensed. Rebuild responsibly.
 
 ---
 
