@@ -677,29 +677,47 @@ BEGIN
                 N'')''
             )
         FROM sys.indexes AS i
-        JOIN sys.tables  AS t ON t.object_id = i.object_id
-        JOIN sys.schemas AS s ON s.schema_id = t.schema_id
-        JOIN sys.partitions AS p ON p.object_id = i.object_id AND p.index_id = i.index_id
-        JOIN sys.data_spaces AS ds ON ds.data_space_id = i.data_space_id
-        LEFT JOIN sys.partition_schemes AS psch ON psch.data_space_id = ds.data_space_id
-        JOIN sys.allocation_units AS au ON au.container_id = p.hobt_id AND au.type IN (1,3)
+        JOIN sys.tables  AS t ON 
+            t.object_id = i.object_id
+        JOIN sys.schemas AS s ON 
+            s.schema_id = t.schema_id
+        JOIN sys.partitions AS p ON 
+            p.object_id = i.object_id AND 
+            p.index_id = i.index_id
+        JOIN sys.data_spaces AS ds ON 
+            ds.data_space_id = i.data_space_id
+        LEFT JOIN sys.partition_schemes AS psch ON 
+            psch.data_space_id = ds.data_space_id
+        JOIN sys.allocation_units AS au ON 
+            au.container_id = p.hobt_id AND au.type IN (1,3)
         CROSS APPLY
         (
             SELECT
                 has_included_lob = CASE WHEN EXISTS
                 (
-                    SELECT 1 FROM sys.index_columns ic
-                    JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-                    WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
-                      AND ic.is_included_column = 1
-                      AND (c.max_length = -1 OR c.system_type_id IN (34,35,99,241))
+                    SELECT 1 
+                    FROM sys.index_columns ic
+                    JOIN sys.columns c ON 
+                      c.object_id = ic.object_id AND 
+                      c.column_id = ic.column_id
+                    WHERE 
+                      ic.object_id = i.object_id AND 
+                      ic.index_id = i.index_id AND 
+                      ic.is_included_column = 1 AND 
+                      (c.max_length = -1 OR c.system_type_id IN (34,35,99,241))
                 ) THEN 1 ELSE 0 END,
                 has_key_blocker = CASE WHEN EXISTS
                 (
-                    SELECT 1 FROM sys.index_columns ic
-                    JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-                    WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
-                      AND ic.key_ordinal > 0 AND (c.is_computed = 1 OR c.system_type_id = 189)
+                    SELECT 1 
+                    FROM sys.index_columns ic
+                    JOIN sys.columns c ON 
+                      c.object_id = ic.object_id AND 
+                      c.column_id = ic.column_id
+                    WHERE 
+                      ic.object_id = i.object_id AND 
+                      ic.index_id = i.index_id AND 
+                      ic.key_ordinal > 0 AND 
+                      (c.is_computed = 1 OR c.system_type_id = 189)
                 ) THEN 1 ELSE 0 END
         ) AS blockers
         CROSS APPLY
@@ -708,36 +726,35 @@ BEGIN
         ) AS rs
         CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), i.object_id, i.index_id, p.partition_number, @mode) AS ps
         WHERE
-            i.index_id > 0
-            AND i.type IN (1,2)
-            AND i.is_hypothetical = 0
-            AND i.is_disabled = 0
-            AND ps.index_level = 0
-            AND ps.page_count >= @pMinPageCount
-            AND ps.avg_page_space_used_in_percent < @pMinPageDensityPct
-            AND t.is_ms_shipped = 0
-            AND t.is_memory_optimized = 0
-            -- Optional @Indexes include / exclude filtering (single-target DB only)
-            AND (
+            i.index_id > 0 AND 
+            i.type IN (1,2) AND 
+            i.is_hypothetical = 0 AND 
+            i.is_disabled = 0 AND 
+            ps.index_level = 0 AND 
+            ps.page_count >= @pMinPageCount AND 
+            ps.avg_page_space_used_in_percent < @pMinPageDensityPct AND 
+            t.is_ms_shipped = 0 AND 
+            t.is_memory_optimized = 0  AND 
+                (
                     NOT EXISTS (SELECT 1 FROM #IndexIncludes)
                  OR EXISTS
                     (
                         SELECT 1
                         FROM #IndexIncludes AS inc
-                        WHERE (inc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)
-                          AND (inc.schema_name IS NULL OR (inc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))
-                          AND (inc.table_name  IS NULL OR (inc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
+                        WHERE 
+                        (inc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>) AND 
+                        (inc.schema_name IS NULL OR (inc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))  AND 
+                        (inc.table_name  IS NULL OR (inc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
                     )
-                )
-            AND NOT EXISTS
+                ) AND NOT EXISTS
                 (
                     SELECT 1
                     FROM #IndexExcludes AS exc
-                    WHERE (exc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)
-                      AND (exc.schema_name IS NULL OR (exc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))
-                      AND (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
-                )
-            AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
+                    WHERE 
+                       (exc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)AND 
+                       (exc.schema_name IS NULL OR (exc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))AND 
+                       (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
+                ) AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
         GROUP BY
             s.name, 
             t.name, 
