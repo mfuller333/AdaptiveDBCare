@@ -51,7 +51,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
 /****** Date Updated: 01/20/2026                                                                            ******/
-/****** Version:     2.8                                                                                    ******/
+/****** Version:     2.9                                                                                    ******/
 /*****************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                       BIT          = 0,
@@ -945,7 +945,13 @@ BEGIN
                 N'' WITH (SORT_IN_TEMPDB = '' + CASE WHEN @pSortInTempdb = 1 THEN N''ON'' ELSE N''OFF'' END +
                 CASE WHEN @ff IS NOT NULL THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), @ff) ELSE N'''' END +
                 CASE WHEN @pMaxDOP IS NOT NULL THEN N'', MAXDOP = '' + CONVERT(VARCHAR(5), @pMaxDOP) ELSE N'''' END +
-                CASE WHEN @pIncludeDataCompressionOption = 1 THEN N'', DATA_COMPRESSION = '' + LEFT(@comp, 60) ELSE N'''' END +
+                CASE WHEN @pIncludeDataCompressionOption = 1
+                     THEN N'', DATA_COMPRESSION = '' +
+                          CASE WHEN @pUseCompressionFromSource = 1
+                               THEN LEFT(@comp, 60)
+                               ELSE (@pForceCompression COLLATE <<DBCOLLATION>>)
+                          END
+                     ELSE N'''' END +
                 N'');'';
 
             BEGIN TRY
