@@ -76,7 +76,7 @@ GO
 /******              Progress messages printed as stats are analyzed and updated.                                ****/
 /****** Created by:  Mike Fuller                                                                                 ****/
 /****** Date Updated: 01/08/2026                                                                                 ****/
-/****** Version:     2.1.1 (cross-DB, central log, progress messages)                                              ****/
+/****** Version:     2.1.1 (cross-DB, central log, progress messages)                                            ****/
 /******                                                                                               ¯\_(ツ)_/¯ ****/
 /********************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_UpdateStatisticsIfChanged]
