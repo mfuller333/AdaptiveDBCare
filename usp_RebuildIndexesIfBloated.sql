@@ -268,25 +268,26 @@ BEGIN
         INSERT #targets(db_name)
         SELECT d.name
         FROM sys.databases AS d
-        WHERE d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution')
-          AND d.state = 0
-          AND d.is_read_only = 0;
+        WHERE 
+          d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution') AND
+          d.state = 0 AND
+          d.is_read_only = 0;
     END
 
     INSERT #targets(db_name)
     SELECT i.name
     FROM #includes AS i
-    JOIN sys.databases AS d
-      ON d.name = i.name COLLATE DATABASE_DEFAULT
-    WHERE d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution')
-      AND d.state = 0
-      AND d.is_read_only = 0
-      AND NOT EXISTS (SELECT 1 FROM #targets WHERE db_name = i.name);
+    JOIN sys.databases AS d ON
+      d.name = i.name COLLATE DATABASE_DEFAULT
+    WHERE 
+      d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution') AND
+      d.state = 0 AND
+      d.is_read_only = 0 AND NOT EXISTS (SELECT 1 FROM #targets WHERE db_name = i.name);
 
     DELETE t
     FROM #targets AS t
-    JOIN #excludes AS x
-      ON t.db_name = x.name COLLATE DATABASE_DEFAULT;
+    JOIN #excludes AS x ON
+         t.db_name = x.name COLLATE DATABASE_DEFAULT;
 
     IF NOT EXISTS (SELECT 1 FROM #targets)
     BEGIN
@@ -297,9 +298,9 @@ BEGIN
 
     IF @TargetCount > 1
     BEGIN
-        IF @Indexes IS NOT NULL
-           AND LTRIM(RTRIM(@Indexes)) <> N''
-           AND UPPER(LTRIM(RTRIM(@Indexes))) <> N'ALL_INDEXES'
+        IF @Indexes IS NOT NULL AND
+           LTRIM(RTRIM(@Indexes)) <> N'' AND
+           UPPER(LTRIM(RTRIM(@Indexes))) <> N'ALL_INDEXES'
         BEGIN
             RAISERROR('@Indexes parameter is ignored when more than one target database is selected; using ALL_INDEXES.', 10, 1) WITH NOWAIT;
         END;
@@ -382,9 +383,10 @@ BEGIN
             BEGIN
                 IF NOT EXISTS (SELECT 1
                                FROM #IndexExcludes
-                               WHERE schema_name = @schema
-                                 AND table_name  = @table
-                                 AND index_name  = @index)
+                               WHERE 
+                                 schema_name = @schema AND
+                                 table_name  = @table AND
+                                 index_name  = @index)
                 BEGIN
                     INSERT #IndexExcludes(schema_name, table_name, index_name)
                     VALUES(@schema, @table, @index);
@@ -394,9 +396,10 @@ BEGIN
             BEGIN
                 IF NOT EXISTS (SELECT 1
                                FROM #IndexIncludes
-                               WHERE schema_name = @schema
-                                 AND table_name  = @table
-                                 AND index_name  = @index)
+                               WHERE 
+                                 schema_name = @schema AND
+                                 table_name  = @table AND
+                                 index_name  = @index)
                 BEGIN
                     INSERT #IndexIncludes(schema_name, table_name, index_name)
                     VALUES(@schema, @table, @index);
@@ -447,36 +450,36 @@ BEGIN
           BEGIN
               CREATE TABLE [DBA].[IndexBloatRebuildLog]
               (
-                  log_id               BIGINT IDENTITY(1,1) PRIMARY KEY,
-                  run_utc              DATETIME2(3)   NOT NULL CONSTRAINT DF_IBRL_run DEFAULT (SYSUTCDATETIME()),
-                  database_name        SYSNAME        NOT NULL,
-                  schema_name          SYSNAME        NOT NULL,
-                  table_name           SYSNAME        NOT NULL,
-                  index_name           SYSNAME        NOT NULL,
-                  index_id             INT            NOT NULL,
-                  partition_number     INT            NOT NULL,
-                  page_count           BIGINT         NOT NULL,
-                  page_density_pct     DECIMAL(6,2)   NOT NULL,
-                  fragmentation_pct    DECIMAL(6,2)   NOT NULL,
-                  chosen_fill_factor   INT            NULL,
-                  online_on            BIT            NOT NULL,
-                  maxdop_used          INT            NULL,
-                  avg_row_bytes        DECIMAL(18,2)  NULL,
-                  record_count         BIGINT         NULL,
-                  ghost_record_count   BIGINT         NULL,
-                  forwarded_record_count BIGINT       NULL,
-                  au_total_pages       BIGINT         NULL,
-                  au_used_pages        BIGINT         NULL,
-                  au_data_pages        BIGINT         NULL,
-                  [action]             VARCHAR(20)    NOT NULL,
-                  cmd                  NVARCHAR(MAX)  NOT NULL,
-                  [status]             VARCHAR(30)    NOT NULL,
-                  error_message        NVARCHAR(4000) NULL,
-                  error_number         INT            NULL,
-                  error_severity       INT            NULL,
-                  error_state          INT            NULL,
-                  error_line           INT            NULL,
-                  error_proc           NVARCHAR(128)  NULL
+                  [log_id]                  BIGINT IDENTITY(1,1) PRIMARY KEY,
+                  [run_utc]                 DATETIME2(3)   NOT NULL CONSTRAINT DF_IBRL_run DEFAULT (SYSUTCDATETIME()),
+                  [database_name]           SYSNAME        NOT NULL,
+                  [schema_name]             SYSNAME        NOT NULL,
+                  [table_name]              SYSNAME        NOT NULL,
+                  [index_name]              SYSNAME        NOT NULL,
+                  [index_id]                INT            NOT NULL,
+                  [partition_number]        INT            NOT NULL,
+                  [page_count]              BIGINT         NOT NULL,
+                  [page_density_pct]        DECIMAL(6,2)   NOT NULL,
+                  [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
+                  [chosen_fill_factor]      INT            NULL,
+                  [online_on]               BIT            NOT NULL,
+                  [maxdop_used]             INT            NULL,
+                  [avg_row_bytes]           DECIMAL(18,2)  NULL,
+                  [record_count]            BIGINT         NULL,
+                  [ghost_record_count]      BIGINT         NULL,
+                  [forwarded_record_count]  BIGINT       NULL,
+                  [au_total_pages]          BIGINT         NULL,
+                  au_used_pages             BIGINT         NULL,
+                  au_data_pages             BIGINT         NULL,
+                  [action]                  VARCHAR(20)    NOT NULL,
+                  cmd                       NVARCHAR(MAX)  NOT NULL,
+                  [status]                  VARCHAR(30)    NOT NULL,
+                  error_message             NVARCHAR(4000) NULL,
+                  error_number              INT            NULL,
+                  error_severity            INT            NULL,
+                  error_state               INT            NULL,
+                  error_line                INT            NULL,
+                  error_proc                NVARCHAR(128)  NULL
               );
           END
            
@@ -486,10 +489,11 @@ BEGIN
                 (
                     SELECT 1
                     FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''cmd''
-                        AND system_type_id = 231
-                        AND max_length <> -1
+                    WHERE 
+                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''cmd'' AND
+                        system_type_id = 231 AND
+                        max_length <> -1
                 )
                 BEGIN
                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
@@ -499,11 +503,11 @@ BEGIN
                 (
                     SELECT 1
                     FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''error_message''
-                        AND system_type_id = 231
-                        AND max_length > 0
-                        AND max_length < 8000
+                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''error_message'' AND
+                        system_type_id = 231 AND
+                        max_length > 0 AND
+                        max_length < 8000
                 )
                 BEGIN
                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
@@ -513,10 +517,11 @@ BEGIN
                 (
                     SELECT 1
                     FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''status''
-                        AND system_type_id = 167
-                        AND max_length < 30
+                    WHERE 
+                       object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''status'' AND
+                        system_type_id = 167 AND
+                        max_length < 30
                 )
                 BEGIN
                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
@@ -526,10 +531,11 @@ BEGIN
                 (
                     SELECT 1
                     FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''action''
-                        AND system_type_id = 167
-                        AND max_length < 20
+                    WHERE 
+                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''action'' AND
+                        system_type_id = 167 AND
+                        max_length < 20
                 )
                 BEGIN
                     ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
@@ -539,11 +545,12 @@ BEGIN
                 (
                     SELECT 1
                     FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''error_proc''
-                        AND system_type_id = 231
-                        AND max_length > 0
-                        AND max_length < 256
+                    WHERE 
+                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''error_proc'' AND
+                        system_type_id = 231 AND
+                        max_length > 0 AND
+                        max_length < 256
                 )
                 BEGIN
                     ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
