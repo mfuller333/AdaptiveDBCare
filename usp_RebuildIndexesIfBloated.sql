@@ -469,17 +469,17 @@ BEGIN
                   [ghost_record_count]      BIGINT         NULL,
                   [forwarded_record_count]  BIGINT       NULL,
                   [au_total_pages]          BIGINT         NULL,
-                  au_used_pages             BIGINT         NULL,
-                  au_data_pages             BIGINT         NULL,
+                  [au_used_pages]           BIGINT         NULL,
+                  [au_data_pages]           BIGINT         NULL,
                   [action]                  VARCHAR(20)    NOT NULL,
-                  cmd                       NVARCHAR(MAX)  NOT NULL,
+                  [cmd]                     NVARCHAR(MAX)  NOT NULL,
                   [status]                  VARCHAR(30)    NOT NULL,
-                  error_message             NVARCHAR(4000) NULL,
-                  error_number              INT            NULL,
-                  error_severity            INT            NULL,
-                  error_state               INT            NULL,
-                  error_line                INT            NULL,
-                  error_proc                NVARCHAR(128)  NULL
+                  [error_message]           NVARCHAR(4000) NULL,
+                  [error_number]            INT            NULL,
+                  [error_severity]          INT            NULL,
+                  [error_state]             INT            NULL,
+                  [error_line]              INT            NULL,
+                  [error_proc]              NVARCHAR(128)  NULL
               );
           END
            
@@ -584,29 +584,29 @@ BEGIN
         IF OBJECT_ID(''tempdb..#candidates'') IS NOT NULL DROP TABLE #candidates;
         CREATE TABLE #candidates
         (
-            schema_name         SYSNAME       NOT NULL,
-            table_name          SYSNAME       NOT NULL,
-            index_name          SYSNAME       NOT NULL,
-            index_id            INT           NOT NULL,
-            partition_number    INT           NOT NULL,
-            page_count          BIGINT        NOT NULL,
-            page_density_pct    DECIMAL(6,2)  NOT NULL,
-            fragmentation_pct   DECIMAL(6,2)  NOT NULL,
-            avg_row_bytes       DECIMAL(18,2) NOT NULL,
-            record_count        BIGINT        NOT NULL,
-            ghost_record_count  BIGINT        NOT NULL,
-            fwd_record_count    BIGINT        NOT NULL,
-            au_total_pages      BIGINT        NOT NULL,
-            au_used_pages       BIGINT        NOT NULL,
-            au_data_pages       BIGINT        NOT NULL,
-            compression_desc    NVARCHAR(60)  NOT NULL,
-            chosen_fill_factor  INT           NULL,
-            is_partitioned      BIT           NOT NULL,
-            is_filtered         BIT           NOT NULL,
-            has_included_lob    BIT           NOT NULL,
-            has_key_blocker     BIT           NOT NULL,
-            resumable_supported BIT           NOT NULL,
-            cmd                 NVARCHAR(MAX) NOT NULL
+            [schema_name]         SYSNAME       NOT NULL,
+            [table_name]          SYSNAME       NOT NULL,
+            [index_name]          SYSNAME       NOT NULL,
+            [index_id]           INT           NOT NULL,
+            [partition_number]    INT           NOT NULL,
+            [page_count]          BIGINT        NOT NULL,
+            [page_density_pct]    DECIMAL(6,2)  NOT NULL,
+            [fragmentation_pct]   DECIMAL(6,2)  NOT NULL,
+            [avg_row_bytes]       DECIMAL(18,2) NOT NULL,
+            [record_count]        BIGINT        NOT NULL,
+            [ghost_record_count]  BIGINT        NOT NULL,
+            [fwd_record_count]    BIGINT        NOT NULL,
+            [au_total_pages]      BIGINT        NOT NULL,
+            [au_used_pages]       BIGINT        NOT NULL,
+            [au_data_pages]       BIGINT        NOT NULL,
+            [compression_desc]    NVARCHAR(60)  NOT NULL,
+            [chosen_fill_factor]  INT           NULL,
+            [is_partitioned]      BIT           NOT NULL,
+            [is_filtered]         BIT           NOT NULL,
+            [has_included_lob]    BIT           NOT NULL,
+            [has_key_blocker]     BIT           NOT NULL,
+            [resumable_supported] BIT           NOT NULL,
+            [cmd]                 NVARCHAR(MAX) NOT NULL
         );
 
         DECLARE @mode VARCHAR(16) = CASE WHEN UPPER(@pSampleMode COLLATE DATABASE_DEFAULT) = N''DETAILED'' THEN N''DETAILED'' ELSE N''SAMPLED'' END;
@@ -856,18 +856,18 @@ BEGIN
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
         (
-            rn                  INT IDENTITY(1,1) PRIMARY KEY,
-            log_id              BIGINT        NOT NULL,
-            cmd                 NVARCHAR(MAX) NOT NULL,
-            schema_name         SYSNAME       NOT NULL,
-            table_name          SYSNAME       NOT NULL,
-            index_name          SYSNAME       NOT NULL,
-            index_id            INT           NOT NULL,
-            partition_number    INT           NOT NULL,
-            page_count          BIGINT        NOT NULL,
-            is_partitioned      BIT           NOT NULL,
-            compression_desc    NVARCHAR(60)  NOT NULL,
-            chosen_fill_factor  INT           NULL
+            [rn]                  INT IDENTITY(1,1) PRIMARY KEY,
+            [log_id]              BIGINT        NOT NULL,
+            [cmd]                 NVARCHAR(MAX) NOT NULL,
+            [schema_name]         SYSNAME       NOT NULL,
+            [table_name]          SYSNAME       NOT NULL,
+            [index_name]          SYSNAME       NOT NULL,
+            [index_id]            INT           NOT NULL,
+            [partition_number]    INT           NOT NULL,
+            [page_count]          BIGINT        NOT NULL,
+            [is_partitioned]      BIT           NOT NULL,
+            [compression_desc]    NVARCHAR(60)  NOT NULL,
+            [chosen_fill_factor]  INT           NULL
         );
 
         INSERT #exec
