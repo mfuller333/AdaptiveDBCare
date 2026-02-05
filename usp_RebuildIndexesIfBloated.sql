@@ -28,6 +28,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                              to >1 DB, @Indexes is forced to ALL_INDEXES.           ******/
 /******              @MinPageDensityPct          = rebuild when avg page density < this (default 70.0)      ******/
 /******              @MinPageCount               = skip partitions < this many pages (default 1000)         ******/
+/******              @MinAvgFragmentSizePages    = defaults to 8 for read ahead fragmentation detection     ******/
 /******              @UseExistingFillFactor      = 1 keep per-index fill factor; 0 use @FillFactor          ******/
 /******              @FillFactor                 = fill factor when above = 0 (1 to 100)                    ******/
 /******              @Online                     = 1 ONLINE-first with OFFLINE fallback                     ******/
@@ -795,7 +796,7 @@ BEGIN
             ps.page_count,
             ps.avg_page_space_used_in_percent, 
             ps.avg_fragmentation_in_percent,
-			ps.avg_fragment_size_in_pages,
+            ps.avg_fragment_size_in_pages,
             ps.avg_record_size_in_bytes, 
             ps.record_count, 
             ps.ghost_record_count, 
@@ -824,7 +825,7 @@ BEGIN
                 c.page_count, 
                 c.page_density_pct, 
                 c.fragmentation_pct,
-				c.avg_fragment_size_pages,
+                c.avg_fragment_size_pages,
                 c.avg_row_bytes, 
                 c.record_count, 
                 c.ghost_record_count, 
@@ -859,7 +860,7 @@ BEGIN
             page_count,
             page_density_pct,
             fragmentation_pct,
-			avg_fragment_size_pages,
+            avg_fragment_size_pages,
             avg_row_bytes,
             record_count,
             ghost_record_count,
@@ -1111,7 +1112,7 @@ BEGIN
             @sql,
             N'@pMinPageDensityPct DECIMAL(5,2),
               @pMinPageCount INT,
-			  @pMinAvgFragSizePages INT,
+              @pMinAvgFragSizePages INT,
               @pUseExistingFillFactor BIT,
               @pFillFactor TINYINT,
               @pOnline BIT,
