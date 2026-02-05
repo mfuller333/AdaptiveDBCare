@@ -51,30 +51,31 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
 /****** Date Updated: 01/20/2026                                                                            ******/
-/****** Version:     2.9                                                                          ¯\_(ツ)_/¯******/
+/****** Version:     3.0                                                                          ¯\_(ツ)_/¯******/
 /*****************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
-      @Help                       BIT          = 0,
+      @Help                       BIT           = 0,
       @TargetDatabases            NVARCHAR(MAX),            -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
       @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
-      @MinPageDensityPct          DECIMAL(5,2) = 70.0,
-      @MinPageCount               INT          = 1000,
-      @UseExistingFillFactor      BIT          = 1,
-      @FillFactor                 TINYINT      = NULL,
-      @Online                     BIT          = 1,
-      @MaxDOP                     INT          = NULL,
-      @SortInTempdb               BIT          = 1,
-      @UseCompressionFromSource   BIT          = 1,
-      @ForceCompression           NVARCHAR(20) = NULL,
-      @SampleMode                 VARCHAR(16)  = 'SAMPLED',  -- SAMPLED | DETAILED
-      @CaptureTrendingSignals     BIT          = 0,          -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
-      @LogDatabase                SYSNAME      = NULL,
-      @WaitAtLowPriorityMinutes   INT          = NULL,
-      @AbortAfterWait             NVARCHAR(20) = NULL,       -- NONE | SELF | BLOCKERS
-      @Resumable                  BIT          = 0,
-      @MaxDurationMinutes         INT          = NULL,
-      @DelayMsBetweenCommands     INT          = NULL,
-      @WhatIf                     BIT          = 1
+      @MinPageDensityPct          DECIMAL(5,2)  = 70.0,
+      @MinPageCount               INT           = 1000,
+      @MinAvgFragmentSizePages    INT           = 8, 
+      @UseExistingFillFactor      BIT           = 1,
+      @FillFactor                 TINYINT       = NULL,
+      @Online                     BIT           = 1,
+      @MaxDOP                     INT           = NULL,
+      @SortInTempdb               BIT           = 1,
+      @UseCompressionFromSource   BIT           = 1,
+      @ForceCompression           NVARCHAR(20)  = NULL,
+      @SampleMode                 VARCHAR(16)   = 'SAMPLED',  -- SAMPLED | DETAILED
+      @CaptureTrendingSignals     BIT           = 0,          -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
+      @LogDatabase                SYSNAME       = NULL,
+      @WaitAtLowPriorityMinutes   INT           = NULL,
+      @AbortAfterWait             NVARCHAR(20)  = NULL,       -- NONE | SELF | BLOCKERS
+      @Resumable                  BIT           = 0,
+      @MaxDurationMinutes         INT           = NULL,
+      @DelayMsBetweenCommands     INT           = NULL,
+      @WhatIf                     BIT           = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -86,26 +87,27 @@ BEGIN
         SELECT
             param_name, sql_type, default_value, description, example
         FROM (VALUES
-              (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer''')
-            , (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne''')
-            , (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0')
-            , (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.',                                                                 N'500')
-            , (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1')
-            , (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.',                                                N'90')
-            , (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.',                                                                              N'1')
-            , (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.',                                                       N'4')
-            , (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.',                                                                                          N'1')
-            , (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.',                                                  N'1')
-            , (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).',                                 N'N''ROW''')
-            , (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.',                                                        N'''DETAILED''')
-            , (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.',               N'1')
-            , (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.',                                                             N'N''UtilityDb''')
-            , (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).',                                                    N'5')
-            , (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).',                                                N'N''BLOCKERS''')
-            , (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).',                                               N'1')
-            , (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.',                                                                              N'60')
-            , (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.',                                                             N'5000')
-            , (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.',                                                                                     N'0')
+             (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer'''),
+             (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne'''),
+             (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0'),
+             (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.',                                                                 N'500'),
+             (N'@MinAvgFragmentSizePages',  N'INT',            N'8',               N'Rebuild when dm_db_index_physical_stats avg_fragment_size_in_pages is below this (SSD read-ahead indicator). Set NULL to disable.', N'8'),
+             (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1'),
+             (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.',                                                N'90'),
+             (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.',                                                                             N'1'),
+             (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.',                                                       N'4'),
+             (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.',                                                                                         N'1'),
+             (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.',                                                 N'1'),
+             (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).',                                N'N''ROW'''),
+             (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.',                                                       N'''DETAILED'''),
+             (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.',               N'1'),
+             (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.',                                                            N'N''UtilityDb'''),
+             (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).',                                                   N'5'),
+             (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).',                                               N'N''BLOCKERS'''),
+             (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).',                                              N'1'),
+             (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.',                                                                             N'60'),
+             (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.',                                                            N'5000'),
+             (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.',                                                                                    N'0')
         ) d(param_name, sql_type, default_value, description, example)
         ORDER BY param_name;
 
@@ -161,6 +163,9 @@ BEGIN
 
     IF @MinPageCount IS NULL OR @MinPageCount <= 0
     BEGIN RAISERROR('@MinPageCount must be a positive integer.',16,1); RETURN; END
+
+    IF @MinAvgFragmentSizePages IS NOT NULL AND @MinAvgFragmentSizePages <= 0
+    BEGIN RAISERROR('@MinAvgFragmentSizePages must be NULL or a positive integer.',16,1); RETURN; END
 
     IF @UseExistingFillFactor = 0 AND ( @FillFactor IS NULL OR @FillFactor NOT BETWEEN 1 AND 100 )
     BEGIN RAISERROR('When @UseExistingFillFactor = 0, @FillFactor must be 1-100.',16,1); RETURN; END
@@ -461,6 +466,7 @@ BEGIN
                   [page_count]              BIGINT         NOT NULL,
                   [page_density_pct]        DECIMAL(6,2)   NOT NULL,
                   [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
+                  [avg_fragment_size_pages] DECIMAL(18,2)  NULL,
                   [chosen_fill_factor]      INT            NULL,
                   [online_on]               BIT            NOT NULL,
                   [maxdop_used]             INT            NULL,
@@ -555,6 +561,18 @@ BEGIN
                 BEGIN
                     ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
                 END
+                IF NOT EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE
+                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
+                        name = N''avg_fragment_size_pages'' AND
+                        system_type_id IN (106, 108)   -- DECIMAL / NUMERIC
+                 )
+                 BEGIN
+                     ALTER TABLE [DBA].[IndexBloatRebuildLog] ADD [avg_fragment_size_pages] DECIMAL(18,2) NULL;
+                 END
             END
             ';
 
@@ -584,29 +602,30 @@ BEGIN
         IF OBJECT_ID(''tempdb..#candidates'') IS NOT NULL DROP TABLE #candidates;
         CREATE TABLE #candidates
         (
-            [schema_name]         SYSNAME       NOT NULL,
-            [table_name]          SYSNAME       NOT NULL,
-            [index_name]          SYSNAME       NOT NULL,
-            [index_id]            INT           NOT NULL,
-            [partition_number]    INT           NOT NULL,
-            [page_count]          BIGINT        NOT NULL,
-            [page_density_pct]    DECIMAL(6,2)  NOT NULL,
-            [fragmentation_pct]   DECIMAL(6,2)  NOT NULL,
-            [avg_row_bytes]       DECIMAL(18,2) NOT NULL,
-            [record_count]        BIGINT        NOT NULL,
-            [ghost_record_count]  BIGINT        NOT NULL,
-            [fwd_record_count]    BIGINT        NOT NULL,
-            [au_total_pages]      BIGINT        NOT NULL,
-            [au_used_pages]       BIGINT        NOT NULL,
-            [au_data_pages]       BIGINT        NOT NULL,
-            [compression_desc]    NVARCHAR(60)  NOT NULL,
-            [chosen_fill_factor]  INT           NULL,
-            [is_partitioned]      BIT           NOT NULL,
-            [is_filtered]         BIT           NOT NULL,
-            [has_included_lob]    BIT           NOT NULL,
-            [has_key_blocker]     BIT           NOT NULL,
-            [resumable_supported] BIT           NOT NULL,
-            [cmd]                 NVARCHAR(MAX) NOT NULL
+            [schema_name]             SYSNAME       NOT NULL,
+            [table_name]              SYSNAME       NOT NULL,
+            [index_name]              SYSNAME       NOT NULL,
+            [index_id]                INT           NOT NULL,
+            [partition_number]        INT           NOT NULL,
+            [page_count]              BIGINT        NOT NULL,
+            [page_density_pct]        DECIMAL(6,2)  NOT NULL,
+            [fragmentation_pct]       DECIMAL(6,2)  NOT NULL,
+            [avg_fragment_size_pages] DECIMAL(18,2) NOT NULL,
+            [avg_row_bytes]           DECIMAL(18,2) NOT NULL,
+            [record_count]            BIGINT        NOT NULL,
+            [ghost_record_count]      BIGINT        NOT NULL,
+            [fwd_record_count]        BIGINT        NOT NULL,
+            [au_total_pages]          BIGINT        NOT NULL,
+            [au_used_pages]           BIGINT        NOT NULL,
+            [au_data_pages]           BIGINT        NOT NULL,
+            [compression_desc]        NVARCHAR(60)  NOT NULL,
+            [chosen_fill_factor]      INT           NULL,
+            [is_partitioned]          BIT           NOT NULL,
+            [is_filtered]             BIT           NOT NULL,
+            [has_included_lob]        BIT           NOT NULL,
+            [has_key_blocker]         BIT           NOT NULL,
+            [resumable_supported]     BIT           NOT NULL,
+            [cmd]                     NVARCHAR(MAX) NOT NULL
         );
 
         DECLARE @mode VARCHAR(16) = CASE WHEN UPPER(@pSampleMode COLLATE DATABASE_DEFAULT) = N''DETAILED'' THEN N''DETAILED'' ELSE N''SAMPLED'' END;
@@ -621,6 +640,7 @@ BEGIN
             page_count, 
             page_density_pct,
             fragmentation_pct, 
+            avg_fragment_size_pages,
             avg_row_bytes, 
             record_count, 
             ghost_record_count, 
@@ -646,6 +666,7 @@ BEGIN
             ps.page_count,
             ps.avg_page_space_used_in_percent, 
             ps.avg_fragmentation_in_percent,
+            COALESCE(CAST(ps.avg_fragment_size_in_pages AS DECIMAL(18,2)), 0),
             COALESCE(CAST(ps.avg_record_size_in_bytes AS DECIMAL(18,2)), 0),
             COALESCE(ps.record_count, 0), 
             COALESCE(ps.ghost_record_count, 0), 
@@ -739,7 +760,10 @@ BEGIN
             i.is_disabled = 0 AND 
             ps.index_level = 0 AND 
             ps.page_count >= @pMinPageCount AND 
-            ps.avg_page_space_used_in_percent < @pMinPageDensityPct AND 
+            (
+                ps.avg_page_space_used_in_percent < @pMinPageDensityPct
+                OR (@pMinAvgFragSizePages IS NOT NULL AND ps.avg_fragment_size_in_pages < @pMinAvgFragSizePages)
+            ) AND 
             t.is_ms_shipped = 0 AND 
             t.is_memory_optimized = 0  AND 
                 (
@@ -771,6 +795,7 @@ BEGIN
             ps.page_count,
             ps.avg_page_space_used_in_percent, 
             ps.avg_fragmentation_in_percent,
+			ps.avg_fragment_size_in_pages,
             ps.avg_record_size_in_bytes, 
             ps.record_count, 
             ps.ghost_record_count, 
@@ -799,6 +824,7 @@ BEGIN
                 c.page_count, 
                 c.page_density_pct, 
                 c.fragmentation_pct,
+				c.avg_fragment_size_pages,
                 c.avg_row_bytes, 
                 c.record_count, 
                 c.ghost_record_count, 
@@ -817,7 +843,7 @@ BEGIN
         INSERT INTO ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
         (
             database_name, schema_name, table_name, index_name, index_id, partition_number,
-            page_count, page_density_pct, fragmentation_pct,
+            page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages,
             avg_row_bytes, record_count, ghost_record_count, forwarded_record_count,
             au_total_pages, au_used_pages, au_data_pages,
             chosen_fill_factor, online_on, maxdop_used, [action], cmd, [status]
@@ -833,6 +859,7 @@ BEGIN
             page_count,
             page_density_pct,
             fragmentation_pct,
+			avg_fragment_size_pages,
             avg_row_bytes,
             record_count,
             ghost_record_count,
@@ -852,7 +879,7 @@ BEGIN
             RETURN;
 
         
-        --EXECUTION with OFFLINE fallback
+        --EXECUTION with OFFLINE fallback FOR ONLINE
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
         (
@@ -1084,6 +1111,7 @@ BEGIN
             @sql,
             N'@pMinPageDensityPct DECIMAL(5,2),
               @pMinPageCount INT,
+			  @pMinAvgFragSizePages INT,
               @pUseExistingFillFactor BIT,
               @pFillFactor TINYINT,
               @pOnline BIT,
@@ -1102,6 +1130,7 @@ BEGIN
               @pIncludeOnlineOption BIT',
               @pMinPageDensityPct            = @MinPageDensityPct,
               @pMinPageCount                 = @MinPageCount,
+              @pMinAvgFragSizePages          = @MinAvgFragmentSizePages,
               @pUseExistingFillFactor        = @UseExistingFillFactor,
               @pFillFactor                   = @FillFactor,
               @pOnline                       = @Online,
