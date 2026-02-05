@@ -6,39 +6,50 @@ This release of AdaptiveDBCare introduces coordinated, cross-database index rebu
 
 ---
 
-# DBA.usp_RebuildIndexesIfBloated (v**2.9**, 2026-01-20)
+# DBA.usp_RebuildIndexesIfBloated (v**3.0**, 2026-02-05)
 
 ---
 
-Rebuild **only** what’s bloated. This procedure finds leaf-level **rowstore** index partitions whose **avg_page_space_used_in_percent** is below a threshold, then rebuilds just those partitions, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
+Rebuild **only** what’s bloated, and only what is truly harmful to SSD read-ahead.
+
+This procedure finds leaf-level **rowstore** index partitions that meet one (or both) of these conditions:
+
+* **Low page density** (`avg_page_space_used_in_percent < @MinPageDensityPct`)
+* **Poor extent continuity** (`avg_fragment_size_in_pages < @MinAvgFragmentSizePages`) which is the metric that actually correlates to read-ahead effectiveness on SSD
+
+It then rebuilds just those partitions, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
 
 > **Works on SQL Server 2014–2025.** ONLINE/RESUMABLE features auto-downgrade based on edition and version (Enterprise/Developer/Evaluation for ONLINE; SQL 2019+ for RESUMABLE). Defaults to safe **WhatIf** mode.
 
 ---
 
-## What’s new in 2.9
+## What’s new in 3.0
 
-* **Compression override honored during OFFLINE fallback**
-  In v2.8, if an ONLINE rebuild failed and the procedure retried OFFLINE, the OFFLINE command always reused the partition’s existing compression.
-  In v2.9, OFFLINE fallback now fully honors the caller’s intent:
+* **New rebuild trigger: `@MinAvgFragmentSizePages` (SSD read-ahead signal)**
+  Logical fragmentation percent is often cosmetic on SSD. Read-ahead cares about extent continuity, best represented by `avg_fragment_size_in_pages`.
 
-  * `@UseCompressionFromSource = 1` → preserves partition compression
-  * `@UseCompressionFromSource = 0` + `@ForceCompression = NONE | ROW | PAGE` → applies the forced compression even during OFFLINE fallback
+  v3.0 introduces:
 
-  ONLINE success and OFFLINE fallback now produce **identical compression outcomes**.
+  * `@MinAvgFragmentSizePages` (default **8**)
 
-* **OFFLINE fallback command logic aligned with ONLINE**
-  OFFLINE rebuild commands now follow the same decision path as ONLINE rebuilds for:
+  A partition becomes a rebuild candidate if **either**:
 
-  * compression source vs override
-  * fill factor selection
-  * `MAXDOP`
-  * `SORT_IN_TEMPDB`
+  * `avg_page_space_used_in_percent < @MinPageDensityPct`
+    **OR**
+  * `avg_fragment_size_in_pages < @MinAvgFragmentSizePages`
 
-  This eliminates behavioral drift between first attempt and retry.
+  Set `@MinAvgFragmentSizePages = NULL` to disable this trigger.
 
-* **Documentation clarity around compression support**
-  The feature and safeguard sections now explicitly document that when compression is unsupported at the server level, compression options are disabled and only uncompressed partitions are eligible.
+  Internal name in the dynamic SQL execution context:
+
+  * `@pMinAvgFragSizePages`
+
+* **Richer logging**
+  The log table now captures the new metric:
+
+  * `avg_fragment_size_pages` (sourced from `avg_fragment_size_in_pages`)
+
+  This provides clear evidence when a rebuild was driven by scattered extents versus low page density.
 
 No breaking changes. No behavioral regressions. Existing automation continues to work as-is.
 
@@ -55,38 +66,57 @@ No breaking changes. No behavioral regressions. Existing automation continues to
 ## Features
 
 * Targets **rowstore** indexes only (clustered and nonclustered), **leaf level**.
+
 * Skips tiny partitions via `@MinPageCount`.
+
 * **Partition-aware**: rebuilds only affected partitions, not entire indexes.
+
+* Candidate detection supports **two independent signals**:
+
+  * low density (`avg_page_space_used_in_percent`)
+  * low avg fragment size (`avg_fragment_size_in_pages`) for SSD read-ahead
+
 * **ONLINE = ON** when supported, with optional `WAIT_AT_LOW_PRIORITY (MAX_DURATION, ABORT_AFTER_WAIT)`.
+
 * **OFFLINE fallback** when ONLINE is not allowed or supported.
+
 * **RESUMABLE** rebuilds (SQL Server 2019+, ONLINE only); auto-disabled when unsupported.
+
 * **Compression control**:
 
   * preserve from source, or
   * force `NONE`, `ROW`, or `PAGE`
   * auto-disabled if unsupported on the server
+
 * **Fill factor**:
 
   * preserve per index, or
   * enforce a global `@FillFactor`
+
 * **MaxDOP**:
 
   * NULL honors server default
   * `0` allows unlimited
   * explicit values supported
+
 * **SORT_IN_TEMPDB**:
 
   * ON by default
   * automatically OFF when RESUMABLE is used (engine limitation)
+
 * **Index filtering (single DB only)** via `@Indexes` include and exclude tokens.
+
 * **Central or per-DB logging** to `[DBA].[IndexBloatRebuildLog]`.
+
 * Captures trending signals:
 
+  * `avg_fragment_size_pages` (new in v3.0)
   * `avg_row_bytes`
   * `record_count`
   * `ghost_record_count`
   * `forwarded_record_count`
   * allocation unit pages (`au_total_pages`, `au_used_pages`, `au_data_pages`)
+
 * Defaults to **WhatIf** (dry run).
 
 ---
@@ -111,7 +141,7 @@ The procedure self-detects engine capabilities and quietly disables unsafe optio
    * the target database, or
    * a central log database specified via `@LogDatabase`.
 
-If the log table already exists, v2.9 enforces compatible column widths to prevent retry and error-path failures.
+If the log table already exists, v3.0 upgrades it as needed (including adding `avg_fragment_size_pages`) and enforces compatible column widths to prevent retry and error-path failures.
 
 > Deploy once. Run anywhere. Log centrally or locally.
 
@@ -126,6 +156,7 @@ If the log table already exists, v2.9 enforces compatible column widths to preve
 | `@Indexes`                  | NVARCHAR(MAX) | `ALL_INDEXES` | **Single DB only.** CSV allow/deny list using `schema.index` or `schema.table.index`; exclusions with `-`. Forced to `ALL_INDEXES` when more than one DB is targeted. |
 | `@MinPageDensityPct`        | DECIMAL(5,2)  | 70.0          | Rebuild when leaf partition density is below this percent.                                                                                                            |
 | `@MinPageCount`             | INT           | 1000          | Skip partitions smaller than this page count.                                                                                                                         |
+| `@MinAvgFragmentSizePages`  | INT           | 8             | Rebuild when `avg_fragment_size_in_pages` drops below this value (SSD read-ahead indicator). Set NULL to disable. Internally passed as `@pMinAvgFragSizePages`.       |
 | `@UseExistingFillFactor`    | BIT           | 1             | Preserve each index’s fill factor.                                                                                                                                    |
 | `@FillFactor`               | TINYINT       | NULL          | Used only when `@UseExistingFillFactor = 0`. Valid range 1–100.                                                                                                       |
 | `@Online`                   | BIT           | 1             | ONLINE when supported; OFFLINE fallback when not.                                                                                                                     |
@@ -152,6 +183,7 @@ If the log table already exists, v2.9 enforces compatible column widths to preve
 * ONLINE options are auto-disabled when unsupported.
 * Compression options are auto-disabled when unsupported.
 * When compression is unsupported, only uncompressed partitions are considered.
+* `@MinAvgFragmentSizePages` can be set to NULL to disable the SSD read-ahead trigger.
 
 ---
 
@@ -243,7 +275,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 * **Log table**: `[DBA].[IndexBloatRebuildLog]`
 
   * Identity: database, schema, table, index, partition
-  * Metrics: density, fragmentation, row and ghost counts, AU pages
+  * Metrics: density, fragmentation, avg fragment size, row and ghost counts, AU pages
   * Options used: fill factor, ONLINE, MAXDOP
   * Action and status:
 
@@ -254,7 +286,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
     * `FAILED_OFFLINE_FALLBACK`
   * Full command text and error metadata
 
-* **Schema hardening**: legacy deployments are auto-corrected for text column widths.
+* **Schema hardening**: legacy deployments are auto-corrected for text column widths, and v3.0 upgrades the log schema to include `avg_fragment_size_pages` when missing.
 
 ---
 
@@ -277,8 +309,8 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 ## Versioning
 
-* **Version**: 2.9
-* **Last updated**: 2026-01-20
+* **Version**: 3.0
+* **Last updated**: 2026-02-05
 
 ---
 
