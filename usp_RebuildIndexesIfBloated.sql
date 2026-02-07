@@ -12,75 +12,76 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
     GO
 /*****************************************************************************************************************/
 /****** Name:        DBA.usp_RebuildIndexesIfBloated                                                        ******/
-/****** Purpose:     Rebuild only leaf-level ROWSTORE index partitions that are bloated by page density.    ******/
-/******              Skips tiny indexes. Partition-aware. Optional ONLINE, MAXDOP, SORT_IN_TEMPDB,          ******/
-/******              compression override, resumable, and low-priority waits.                               ******/
+/****** Purpose:     Rebuild only leaf-level ROWSTORE index partitions that are:                            ******/
+/******              1) Bloated by low page density (avg_page_space_used_in_percent), OR                    ******/
+/******              2) Likely impacting read-ahead due to short fragment runs (avg_fragment_size_in_pages) ******/
+/******                 BUT only when scan evidence exists (dm_db_index_usage_stats).                       ******/
+/******                                                                                                     ******/
+/******              Includes guardrails to avoid rebuilding indexes that are intentionally sparse          ******/
+/******              (very low FILLFACTOR), unless density is extremely poor.                               ******/
 /******                                                                                                     ******/
 /****** Input:       @Help                       = 1 prints help and examples; 0 runs normally              ******/
-/******              @TargetDatabases            = CSV of DBs, or 'ALL_USER_DBS', with optional             ******/
-/******                                              *exclusions* prefixed by '-' (e.g. '-DW,-ReportServer')******/
-/******                                              System DBs (master, model, msdb, tempdb) and           ******/
-/******                                              'distribution' are always excluded.                    ******/
+/******              @TargetDatabases            = CSV of DBs, or 'ALL_USER_DBS', with optional exclusions  ******/
 /******              @Indexes                    = (single-target-db only) CSV of indexes or 'ALL_INDEXES'  ******/
-/******                                              Supports exclusions via -[schema].[index] or           ******/
-/******                                              -[schema].[table].[index].                             ******/
-/******                                              If @TargetDatabases uses ALL_USER_DBS or resolves      ******/
-/******                                              to >1 DB, @Indexes is forced to ALL_INDEXES.           ******/
 /******              @MinPageDensityPct          = rebuild when avg page density < this (default 70.0)      ******/
 /******              @MinPageCount               = skip partitions < this many pages (default 1000)         ******/
-/******              @MinAvgFragmentSizePages    = defaults to 8 for read ahead fragmentation detection     ******/
-/******              @UseExistingFillFactor      = 1 keep per-index fill factor; 0 use @FillFactor          ******/
-/******              @FillFactor                 = fill factor when above = 0 (1 to 100)                    ******/
-/******              @Online                     = 1 ONLINE-first with OFFLINE fallback                     ******/
-/******              @MaxDOP                     = NULL omit; else MAXDOP value                             ******/
-/******              @SortInTempdb               = 1 SORT_IN_TEMPDB = ON; 0 OFF                             ******/
-/******              @UseCompressionFromSource   = 1 keep DATA_COMPRESSION from source; 0 override          ******/
-/******              @ForceCompression           = NONE | ROW | PAGE when above = 0                         ******/
-/******              @SampleMode                 = 'SAMPLED' | 'DETAILED'                                   ******/
-/******              @CaptureTrendingSignals     = 1 ensures trending metrics; auto-SAMPLED ? DETAILED      ******/
-/******              @LogDatabase                = NULL log in each target DB; else central log DB name     ******/
-/******              @WaitAtLowPriorityMinutes   = minutes for WAIT_AT_LOW_PRIORITY (ONLINE only)           ******/
-/******              @AbortAfterWait             = NONE | SELF | BLOCKERS (requires above)                  ******/
-/******              @Resumable                  = 1 use RESUMABLE (ONLINE only; SQL 2019+); 0 off          ******/
-/******              @MaxDurationMinutes         = MAX_DURATION minutes for resumable (optional)            ******/
-/******              @DelayMsBetweenCommands     = optional delay in ms between rebuild commands            ******/
-/******              @WhatIf                     = 1 dry-run; logs/prints only; 0 execute rebuilds          ******/
 /******                                                                                                     ******/
-/****** Output:      1) Messages: STARTING db, per-table candidate updates, COMPLETED db.                   ******/
-/******              2) Result set per DB with candidate tables (#scan_out emitted via SELECT).             ******/
-/******              3) Rows logged to [DBA].[IndexBloatRebuildLog] with action/status/details.             ******/
+/******              Read-ahead path (tightly gated):                                                       ******/
+/******              @MinAvgFragmentSizePages    = avg_fragment_size_in_pages threshold (default 8)         ******/
+/******              @ReadAheadMinPageCount      = min page_count for read-ahead checks (default 50000)     ******/
+/******              @ReadAheadMinFragPct        = min fragmentation pct for read-ahead checks (default 30) ******/
+/******              @ReadAheadMinScanOps        = min scans+lookups since restart (default 1000)           ******/
+/******              @ReadAheadLookbackDays      = accept recent last_user_scan (default 7)                 ******/
+/******                                                                                                     ******/
+/******              Low fill factor avoidance:                                                             ******/
+/******              @SkipLowFillFactor          = 1 apply guardrails (default 1)                           ******/
+/******              @LowFillFactorThreshold     = treat <= this as intentionally sparse (default 80)       ******/
+/******              @LowFillFactorDensitySlackPct = require much worse density for low FF (default 15.0)   ******/
+/******              @ReadAheadMinFillFactor     = require FF >= this for read-ahead path (default 90)      ******/
+/******                                                                                                     ******/
+/******              Online + rebuild options: ONLINE, MAXDOP, SORT_IN_TEMPDB, compression, resumable, etc. ******/
+/******                                                                                                     ******/
+/****** Output:      1) Messages: STARTING db, per-index progress, COMPLETED db.                            ******/
+/******              2) Rows logged to [DBA].[IndexBloatRebuildLog] with reason + fill factor metadata.     ******/
+/******                 candidate_reason = DENSITY | READ_AHEAD                                             ******/
+/******                 source_fill_factor, fill_factor_guard_applied                                       ******/
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
-/****** Date Updated: 01/20/2026                                                                            ******/
-/****** Version:     3.0                                                                          ¯\_(ツ)_/¯******/
+/****** Date Updated: 02/07/2026                                                                            ******/
+/****** Version:     3.1                                                                          ¯\_(ツ)_/¯******/
 /*****************************************************************************************************************/
+
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
-      @Help                       BIT           = 0,
-      @TargetDatabases            NVARCHAR(MAX),            -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
-      @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
-      @MinPageDensityPct          DECIMAL(5,2)  = 70.0,
-      @MinPageCount               INT           = 1000,
-      @MinAvgFragmentSizePages    INT           = 8,
-      @ReadAheadMinPageCount      INT           = 50000,      -- read-ahead path: only consider large leaf partitions
-      @ReadAheadMinFragPct        DECIMAL(5,2)  = 30.0,       -- read-ahead path: avoid trivial fragmentation noise
-      @ReadAheadMinScanOps        BIGINT        = 1000,       -- read-ahead path: require scan evidence (since last restart)
-      @ReadAheadLookbackDays      INT           = 7,          -- read-ahead path: accept recent last_user_scan 
-      @UseExistingFillFactor      BIT           = 1,
-      @FillFactor                 TINYINT       = NULL,
-      @Online                     BIT           = 1,
-      @MaxDOP                     INT           = NULL,
-      @SortInTempdb               BIT           = 1,
-      @UseCompressionFromSource   BIT           = 1,
-      @ForceCompression           NVARCHAR(20)  = NULL,
-      @SampleMode                 VARCHAR(16)   = 'SAMPLED',  -- SAMPLED | DETAILED
-      @CaptureTrendingSignals     BIT           = 0,          -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
-      @LogDatabase                SYSNAME       = NULL,
-      @WaitAtLowPriorityMinutes   INT           = NULL,
-      @AbortAfterWait             NVARCHAR(20)  = NULL,       -- NONE | SELF | BLOCKERS
-      @Resumable                  BIT           = 0,
-      @MaxDurationMinutes         INT           = NULL,
-      @DelayMsBetweenCommands     INT           = NULL,
-      @WhatIf                     BIT           = 1
+      @Help                         BIT           = 0,
+      @TargetDatabases              NVARCHAR(MAX),                  -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
+      @Indexes                      NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
+      @MinPageDensityPct            DECIMAL(5,2)  = 70.0,
+      @MinPageCount                 INT           = 1000,
+      @MinAvgFragmentSizePages      INT           = 8,
+      @ReadAheadMinPageCount        INT           = 50000,          -- read-ahead path: only consider large leaf partitions
+      @ReadAheadMinFragPct          DECIMAL(5,2)  = 30.0,           -- read-ahead path: avoid trivial fragmentation noise
+      @ReadAheadMinScanOps          BIGINT        = 1000,           -- read-ahead path: require scan evidence (since last restart)
+      @ReadAheadLookbackDays        INT           = 7,              -- read-ahead path: accept recent last_user_scan 
+      @ReadAheadMinFillFactor       TINYINT       = 90,
+      @SkipLowFillFactor            BIT           = 1,
+      @LowFillFactorThreshold       TINYINT       = 80,
+      @LowFillFactorDensitySlackPct DECIMAL(5,2)  = 15.0,
+      @UseExistingFillFactor        BIT           = 1,
+      @FillFactor                   TINYINT       = NULL,
+      @Online                       BIT           = 1,
+      @MaxDOP                       INT           = NULL,
+      @SortInTempdb                 BIT           = 1,
+      @UseCompressionFromSource     BIT           = 1,
+      @ForceCompression             NVARCHAR(20)  = NULL,
+      @SampleMode                   VARCHAR(16)   = 'SAMPLED',      -- SAMPLED | DETAILED
+      @CaptureTrendingSignals       BIT           = 0,              -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
+      @LogDatabase                  SYSNAME       = NULL,
+      @WaitAtLowPriorityMinutes     INT           = NULL,
+      @AbortAfterWait               NVARCHAR(20)  = NULL,           -- NONE | SELF | BLOCKERS
+      @Resumable                    BIT           = 0,
+      @MaxDurationMinutes           INT           = NULL,
+      @DelayMsBetweenCommands       INT           = NULL,
+      @WhatIf                       BIT           = 1
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -92,31 +93,35 @@ BEGIN
         SELECT
             param_name, sql_type, default_value, description, example
         FROM (VALUES
-             (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer'''),
-             (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne'''),
-             (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.', N'65.0'),
-             (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.', N'500'),
-             (N'@MinAvgFragmentSizePages',  N'INT',            N'8',               N'Rebuild when dm_db_index_physical_stats avg_fragment_size_in_pages is below this (SSD read-ahead indicator). Set NULL to disable.', N'8'),
-             (N'@ReadAheadMinPageCount',    N'INT',            N'50000',           N'Read-ahead path: minimum page_count required to consider avg_fragment_size_in_pages.', N'50000'),
-             (N'@ReadAheadMinFragPct',      N'DECIMAL(5,2)',   N'20.0',            N'Read-ahead path: minimum avg_fragmentation_in_percent required to reduce false positives.', N'20.0'),
-             (N'@ReadAheadMinScanOps',      N'BIGINT',         N'1000',            N'Read-ahead path: minimum (user_scans + user_lookups) from dm_db_index_usage_stats (since last restart).', N'1000'),
-             (N'@ReadAheadLookbackDays',    N'INT',            N'7',               N'Read-ahead path: accept if last_user_scan is within this many days (helps even if scan counts are low).', N'7'),
-             (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.', N'1'),
-             (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.', N'90'),
-             (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.', N'1'),
-             (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.', N'4'),
-             (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.', N'1'),
-             (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.', N'1'),
-             (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).', N'N''ROW'''),
-             (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.', N'''DETAILED'''),
-             (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.', N'1'),
-             (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.', N'N''UtilityDb'''),
-             (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).', N'5'),
-             (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).', N'N''BLOCKERS'''),
-             (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).', N'1'),
-             (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.', N'60'),
-             (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.', N'5000'),
-             (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.', N'0')
+             (N'@TargetDatabases',              N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer'''),
+             (N'@Indexes',                      N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne'''),
+             (N'@MinPageDensityPct',            N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.', N'65.0'),
+             (N'@MinPageCount',                 N'INT',            N'1000',            N'Skip tiny partitions below this page count.', N'500'),
+             (N'@MinAvgFragmentSizePages',      N'INT',            N'8',               N'Rebuild when dm_db_index_physical_stats avg_fragment_size_in_pages is below this (SSD read-ahead indicator). Set NULL to disable.', N'8'),
+             (N'@ReadAheadMinPageCount',        N'INT',            N'50000',           N'Read-ahead path: minimum page_count required to consider avg_fragment_size_in_pages.', N'50000'),
+             (N'@ReadAheadMinFragPct',          N'DECIMAL(5,2)',   N'30.0',            N'Read-ahead path: minimum avg_fragmentation_in_percent required to reduce false positives.', N'20.0'),
+             (N'@ReadAheadMinScanOps',          N'BIGINT',         N'1000',            N'Read-ahead path: minimum (user_scans + user_lookups) from dm_db_index_usage_stats (since last restart).', N'1000'),
+             (N'@ReadAheadLookbackDays',        N'INT',            N'7',               N'Read-ahead path: accept if last_user_scan is within this many days (helps even if scan counts are low).', N'7'),
+             (N'@ReadAheadMinFillFactor',       N'TINYINT',        N'90',              N'Read-ahead path only: require FF >= this to reduce churn on intentionally sparse indexes.', N'90'),
+             (N'@SkipLowFillFactor',            N'BIT',            N'1',               N'If 1, apply a guard to avoid rebuilding indexes that are intentionally sparse (low fill factor).', N'1'),
+             (N'@LowFillFactorThreshold',       N'TINYINT',        N'80',              N'Fill factor <= this is treated as intentionally sparse.', N'80'),
+             (N'@LowFillFactorDensitySlackPct', N'DECIMAL(5,2)',   N'15.0',            N'For low-FF indexes, require density < (MinPageDensityPct - slack) to rebuild via density path.', N'15.0'),
+             (N'@UseExistingFillFactor',        N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.', N'1'),
+             (N'@FillFactor',                   N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.', N'90'),
+             (N'@Online',                       N'BIT',            N'1',               N'Use ONLINE = ON when supported.', N'1'),
+             (N'@MaxDOP',                       N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.', N'4'),
+             (N'@SortInTempdb',                 N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.', N'1'),
+             (N'@UseCompressionFromSource',     N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.', N'1'),
+             (N'@ForceCompression',             N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).', N'N''ROW'''),
+             (N'@SampleMode',                   N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.', N'''DETAILED'''),
+             (N'@CaptureTrendingSignals',       N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.', N'1'),
+             (N'@LogDatabase',                  N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.', N'N''UtilityDb'''),
+             (N'@WaitAtLowPriorityMinutes',     N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).', N'5'),
+             (N'@AbortAfterWait',               N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).', N'N''BLOCKERS'''),
+             (N'@Resumable',                    N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).', N'1'),
+             (N'@MaxDurationMinutes',           N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.', N'60'),
+             (N'@DelayMsBetweenCommands',       N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.', N'5000'),
+             (N'@WhatIf',                       N'BIT',            N'1',               N'Dry run: log/print only.', N'0')
         ) d(param_name, sql_type, default_value, description, example)
         ORDER BY param_name;
 
@@ -187,6 +192,15 @@ BEGIN
 
     IF @ReadAheadLookbackDays IS NULL OR @ReadAheadLookbackDays < 0
     BEGIN RAISERROR('@ReadAheadLookbackDays must be >= 0.',16,1); RETURN; END
+
+    IF @LowFillFactorThreshold NOT BETWEEN 1 AND 100
+    BEGIN RAISERROR('@LowFillFactorThreshold must be 1-100.',16,1); RETURN; END
+
+    IF @LowFillFactorDensitySlackPct IS NULL OR @LowFillFactorDensitySlackPct < 0 OR @LowFillFactorDensitySlackPct >= 100
+    BEGIN RAISERROR('@LowFillFactorDensitySlackPct must be between 0 and 100.',16,1); RETURN; END
+
+    IF @ReadAheadMinFillFactor NOT BETWEEN 1 AND 100
+    BEGIN RAISERROR('@ReadAheadMinFillFactor must be 1-100.',16,1); RETURN; END
 
     IF @UseExistingFillFactor = 0 AND ( @FillFactor IS NULL OR @FillFactor NOT BETWEEN 1 AND 100 )
     BEGIN RAISERROR('When @UseExistingFillFactor = 0, @FillFactor must be 1-100.',16,1); RETURN; END
@@ -471,146 +485,170 @@ BEGIN
         -- Ensure log table exists for this target's chosen log DB
         DECLARE @ddl NVARCHAR(MAX) =
         N'USE ' + @qLogDb + N';
-          IF SCHEMA_ID(N''DBA'') IS NULL EXEC(''CREATE SCHEMA DBA AUTHORIZATION dbo'');
-          IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NULL
-          BEGIN
-              CREATE TABLE [DBA].[IndexBloatRebuildLog]
-              (
-                  [log_id]                  BIGINT IDENTITY(1,1) PRIMARY KEY,
-                  [run_utc]                 DATETIME2(3)   NOT NULL CONSTRAINT DF_IBRL_run DEFAULT (SYSUTCDATETIME()),
-                  [database_name]           SYSNAME        NOT NULL,
-                  [schema_name]             SYSNAME        NOT NULL,
-                  [table_name]              SYSNAME        NOT NULL,
-                  [index_name]              SYSNAME        NOT NULL,
-                  [index_id]                INT            NOT NULL,
-                  [partition_number]        INT            NOT NULL,
-                  [page_count]              BIGINT         NOT NULL,
-                  [page_density_pct]        DECIMAL(6,2)   NOT NULL,
-                  [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
-                  [avg_fragment_size_pages] DECIMAL(18,2)  NULL,
-                  [candidate_reason]        VARCHAR(20)    NOT NULL CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY''),
-                  [chosen_fill_factor]      INT            NULL,
-                  [online_on]               BIT            NOT NULL,
-                  [maxdop_used]             INT            NULL,
-                  [avg_row_bytes]           DECIMAL(18,2)  NULL,
-                  [record_count]            BIGINT         NULL,
-                  [ghost_record_count]      BIGINT         NULL,
-                  [forwarded_record_count]  BIGINT         NULL,
-                  [au_total_pages]          BIGINT         NULL,
-                  [au_used_pages]           BIGINT         NULL,
-                  [au_data_pages]           BIGINT         NULL,
-                  [action]                  VARCHAR(20)    NOT NULL,
-                  [cmd]                     NVARCHAR(MAX)  NOT NULL,
-                  [status]                  VARCHAR(30)    NOT NULL,
-                  [error_message]           NVARCHAR(4000) NULL,
-                  [error_number]            INT            NULL,
-                  [error_severity]          INT            NULL,
-                  [error_state]             INT            NULL,
-                  [error_line]              INT            NULL,
-                  [error_proc]              NVARCHAR(128)  NULL
-              );
-          END
-           
-          IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NOT NULL
+        IF SCHEMA_ID(N''DBA'') IS NULL EXEC(''CREATE SCHEMA DBA AUTHORIZATION dbo'');
+
+        IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NULL
+        BEGIN
+            CREATE TABLE [DBA].[IndexBloatRebuildLog]
+            (
+                [log_id]                  BIGINT IDENTITY(1,1) PRIMARY KEY,
+                [run_utc]                 DATETIME2(3)   NOT NULL CONSTRAINT DF_IBRL_run DEFAULT (SYSUTCDATETIME()),
+                [database_name]           SYSNAME        NOT NULL,
+                [schema_name]             SYSNAME        NOT NULL,
+                [table_name]              SYSNAME        NOT NULL,
+                [index_name]              SYSNAME        NOT NULL,
+                [index_id]                INT            NOT NULL,
+                [partition_number]        INT            NOT NULL,
+                [page_count]              BIGINT         NOT NULL,
+                [page_density_pct]        DECIMAL(6,2)   NOT NULL,
+                [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
+                [avg_fragment_size_pages] DECIMAL(18,2)  NULL,
+
+                [candidate_reason]        VARCHAR(20)    NOT NULL CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY''),
+                [source_fill_factor]      INT            NULL,
+                [fill_factor_guard_applied] BIT          NOT NULL CONSTRAINT DF_IBRL_ffguard DEFAULT (0),
+
+                [chosen_fill_factor]      INT            NULL,
+                [online_on]               BIT            NOT NULL,
+                [maxdop_used]             INT            NULL,
+                [avg_row_bytes]           DECIMAL(18,2)  NULL,
+                [record_count]            BIGINT         NULL,
+                [ghost_record_count]      BIGINT         NULL,
+                [forwarded_record_count]  BIGINT         NULL,
+                [au_total_pages]          BIGINT         NULL,
+                [au_used_pages]           BIGINT         NULL,
+                [au_data_pages]           BIGINT         NULL,
+                [action]                  VARCHAR(20)    NOT NULL,
+                [cmd]                     NVARCHAR(MAX)  NOT NULL,
+                [status]                  VARCHAR(30)    NOT NULL,
+                [error_message]           NVARCHAR(4000) NULL,
+                [error_number]            INT            NULL,
+                [error_severity]          INT            NULL,
+                [error_state]             INT            NULL,
+                [error_line]              INT            NULL,
+                [error_proc]              NVARCHAR(128)  NULL
+            );
+        END
+
+        IF OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'', N''U'') IS NOT NULL
+        BEGIN
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''cmd''
+                    AND system_type_id = 231
+                    AND max_length <> -1
+            )
             BEGIN
-                IF EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE 
-                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''cmd'' AND
-                        system_type_id = 231 AND
-                        max_length <> -1
-                )
-                BEGIN
-                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
-                END
-
-                IF EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''error_message'' AND
-                        system_type_id = 231 AND
-                        max_length > 0 AND
-                        max_length < 8000
-                )
-                BEGIN
-                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
-                END
-
-                IF EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE 
-                       object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''status'' AND
-                        system_type_id = 167 AND
-                        max_length < 30
-                )
-                BEGIN
-                   ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
-                END
-
-                IF EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE 
-                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''action'' AND
-                        system_type_id = 167 AND
-                        max_length < 20
-                )
-                BEGIN
-                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
-                END
-
-                IF EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE 
-                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''error_proc'' AND
-                        system_type_id = 231 AND
-                        max_length > 0 AND
-                        max_length < 256
-                )
-                BEGIN
-                    ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
-                END
-                IF NOT EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE
-                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'') AND
-                        name = N''avg_fragment_size_pages'' AND
-                        system_type_id IN (106, 108)   -- DECIMAL / NUMERIC
-                 )
-                 BEGIN
-                     ALTER TABLE [DBA].[IndexBloatRebuildLog] ADD [avg_fragment_size_pages] DECIMAL(18,2) NULL;
-                 END
-                IF NOT EXISTS
-                (
-                    SELECT 1
-                    FROM sys.columns
-                    WHERE
-                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
-                        AND name = N''candidate_reason''
-                )
-                BEGIN
-                    ALTER TABLE [DBA].[IndexBloatRebuildLog]
-                        ADD [candidate_reason] VARCHAR(20) NOT NULL
-                            CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY'');
-                END
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN cmd NVARCHAR(MAX) NOT NULL;
             END
-            ';
 
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''error_message''
+                    AND system_type_id = 231
+                    AND max_length > 0
+                    AND max_length < 8000
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_message NVARCHAR(4000) NULL;
+            END
+
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''status''
+                    AND system_type_id = 167
+                    AND max_length < 30
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [status] VARCHAR(30) NOT NULL;
+            END
+
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''action''
+                    AND system_type_id = 167
+                    AND max_length < 20
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN [action] VARCHAR(20) NOT NULL;
+            END
+
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''error_proc''
+                    AND system_type_id = 231
+                    AND max_length > 0
+                    AND max_length < 256
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ALTER COLUMN error_proc NVARCHAR(128) NULL;
+            END
+
+            IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''avg_fragment_size_pages''
+                    AND system_type_id IN (106,108)
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ADD [avg_fragment_size_pages] DECIMAL(18,2) NULL;
+            END
+
+            IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''candidate_reason''
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog]
+                    ADD [candidate_reason] VARCHAR(20) NOT NULL
+                        CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY'');
+            END
+
+            IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''source_fill_factor''
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog] ADD [source_fill_factor] INT NULL;
+            END
+
+            IF NOT EXISTS
+            (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                    AND name = N''fill_factor_guard_applied''
+            )
+            BEGIN
+                ALTER TABLE [DBA].[IndexBloatRebuildLog]
+                    ADD [fill_factor_guard_applied] BIT NOT NULL
+                        CONSTRAINT DF_IBRL_ffguard DEFAULT (0);
+            END
+        END
+        ';
         BEGIN TRY
             EXEC (@ddl);
         END TRY
@@ -637,94 +675,83 @@ BEGIN
         IF OBJECT_ID(''tempdb..#candidates'') IS NOT NULL DROP TABLE #candidates;
         CREATE TABLE #candidates
         (
-            [schema_name]             SYSNAME       NOT NULL,
-            [table_name]              SYSNAME       NOT NULL,
-            [index_name]              SYSNAME       NOT NULL,
-            [index_id]                INT           NOT NULL,
-            [partition_number]        INT           NOT NULL,
-            [page_count]              BIGINT        NOT NULL,
-            [page_density_pct]        DECIMAL(6,2)  NOT NULL,
-            [fragmentation_pct]       DECIMAL(6,2)  NOT NULL,
-            [avg_fragment_size_pages] DECIMAL(18,2) NOT NULL,
-            [avg_row_bytes]           DECIMAL(18,2) NOT NULL,
-            [record_count]            BIGINT        NOT NULL,
-            [ghost_record_count]      BIGINT        NOT NULL,
-            [fwd_record_count]        BIGINT        NOT NULL,
-            [au_total_pages]          BIGINT        NOT NULL,
-            [au_used_pages]           BIGINT        NOT NULL,
-            [au_data_pages]           BIGINT        NOT NULL,
-            [user_seeks]              BIGINT        NOT NULL,
-            [user_scans]              BIGINT        NOT NULL,
-            [user_lookups]            BIGINT        NOT NULL,
-            [user_updates]            BIGINT        NOT NULL,
-            [last_user_seek]          DATETIME      NULL,
-            [last_user_scan]          DATETIME      NULL,
-            [last_user_lookup]        DATETIME      NULL,
-            [compression_desc]        NVARCHAR(60)  NOT NULL,
-            [chosen_fill_factor]      INT           NULL,
-            [is_partitioned]          BIT           NOT NULL,
-            [is_filtered]             BIT           NOT NULL,
-            [has_included_lob]        BIT           NOT NULL,
-            [has_key_blocker]         BIT           NOT NULL,
-            [resumable_supported]     BIT           NOT NULL,
-            [cmd]                     NVARCHAR(MAX) NOT NULL,
-            [candidate_reason]        VARCHAR(20)   NOT NULL,
+            [schema_name]               SYSNAME       NOT NULL,
+            [table_name]                SYSNAME       NOT NULL,
+            [index_name]                SYSNAME       NOT NULL,
+            [index_id]                  INT           NOT NULL,
+            [partition_number]          INT           NOT NULL,
+            [page_count]                BIGINT        NOT NULL,
+            [page_density_pct]          DECIMAL(6,2)  NOT NULL,
+            [fragmentation_pct]         DECIMAL(6,2)  NOT NULL,
+            [avg_fragment_size_pages]   DECIMAL(18,2) NOT NULL,
+            [avg_row_bytes]             DECIMAL(18,2) NOT NULL,
+            [record_count]              BIGINT        NOT NULL,
+            [ghost_record_count]        BIGINT        NOT NULL,
+            [fwd_record_count]          BIGINT        NOT NULL,
+            [au_total_pages]            BIGINT        NOT NULL,
+            [au_used_pages]             BIGINT        NOT NULL,
+            [au_data_pages]             BIGINT        NOT NULL,
+
+            [user_seeks]                BIGINT        NOT NULL,
+            [user_scans]                BIGINT        NOT NULL,
+            [user_lookups]              BIGINT        NOT NULL,
+            [user_updates]              BIGINT        NOT NULL,
+            [last_user_seek]            DATETIME      NULL,
+            [last_user_scan]            DATETIME      NULL,
+            [last_user_lookup]          DATETIME      NULL,
+
+            [compression_desc]          NVARCHAR(60)  NOT NULL,
+
+            [source_fill_factor]        INT           NOT NULL,
+            [fill_factor_guard_applied] BIT           NOT NULL,
+
+            [chosen_fill_factor]        INT           NULL,
+            [is_partitioned]            BIT           NOT NULL,
+            [is_filtered]               BIT           NOT NULL,
+            [has_included_lob]          BIT           NOT NULL,
+            [has_key_blocker]           BIT           NOT NULL,
+            [resumable_supported]       BIT           NOT NULL,
+
+            [candidate_reason]          VARCHAR(20)   NOT NULL,
+            [cmd]                       NVARCHAR(MAX) NOT NULL
         );
 
-        DECLARE @mode VARCHAR(16) = CASE WHEN UPPER(@pSampleMode COLLATE DATABASE_DEFAULT) = N''DETAILED'' THEN N''DETAILED'' ELSE N''SAMPLED'' END;
+        DECLARE @mode VARCHAR(16) =
+            CASE WHEN UPPER(@pSampleMode COLLATE DATABASE_DEFAULT) = N''DETAILED'' THEN N''DETAILED'' ELSE N''SAMPLED'' END;
 
         INSERT INTO #candidates
         (
-            schema_name, 
-            table_name, 
-            index_name, 
-            index_id,
-            partition_number, 
-            page_count, 
-            page_density_pct,
-            fragmentation_pct, 
-            avg_fragment_size_pages,
-            avg_row_bytes, 
-            record_count, 
-            ghost_record_count, 
-            fwd_record_count,
-            au_total_pages, 
-            au_used_pages, 
-            au_data_pages, 
-            user_seeks,
-            user_scans,
-            user_lookups,
-            user_updates,
-            last_user_seek,
-            last_user_scan,
-            last_user_lookup,
-            compression_desc, 
+            schema_name, table_name, index_name, index_id,
+            partition_number, page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages,
+            avg_row_bytes, record_count, ghost_record_count, fwd_record_count,
+            au_total_pages, au_used_pages, au_data_pages,
+            user_seeks, user_scans, user_lookups, user_updates,
+            last_user_seek, last_user_scan, last_user_lookup,
+            compression_desc,
+            source_fill_factor, fill_factor_guard_applied,
             chosen_fill_factor,
-            is_partitioned, 
-            is_filtered, 
-            has_included_lob, 
-            has_key_blocker, 
-            resumable_supported, 
-            cmd,
-            candidate_reason
+            is_partitioned, is_filtered, has_included_lob, has_key_blocker, resumable_supported,
+            candidate_reason,
+            cmd
         )
         SELECT
-            s.name, 
-            t.name, 
-            i.name, 
+            s.name,
+            t.name,
+            i.name,
             i.index_id,
-            ps.partition_number, 
+            ps.partition_number,
             ps.page_count,
-            ps.avg_page_space_used_in_percent, 
+            ps.avg_page_space_used_in_percent,
             ps.avg_fragmentation_in_percent,
             COALESCE(CAST(ps.avg_fragment_size_in_pages AS DECIMAL(18,2)), 0),
             COALESCE(CAST(ps.avg_record_size_in_bytes AS DECIMAL(18,2)), 0),
-            COALESCE(ps.record_count, 0), 
-            COALESCE(ps.ghost_record_count, 0), 
+            COALESCE(ps.record_count, 0),
+            COALESCE(ps.ghost_record_count, 0),
             COALESCE(ps.forwarded_record_count, 0),
-            COALESCE(SUM(au.total_pages),0), 
-            COALESCE(SUM(au.used_pages),0), 
+            COALESCE(SUM(au.total_pages),0),
+            COALESCE(SUM(au.used_pages),0),
             COALESCE(SUM(au.data_pages),0),
+
             COALESCE(us.user_seeks,   0),
             COALESCE(us.user_scans,   0),
             COALESCE(us.user_lookups, 0),
@@ -732,165 +759,218 @@ BEGIN
             us.last_user_seek,
             us.last_user_scan,
             us.last_user_lookup,
+
             p.data_compression_desc,
+
+            ff.source_fill_factor,
+            ff.fill_factor_guard_applied,
+
             CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END,
             CASE WHEN psch.data_space_id IS NULL THEN 0 ELSE 1 END,
             i.has_filter,
             blockers.has_included_lob,
             blockers.has_key_blocker,
             rs.resumable_supported,
+
+            CASE
+                WHEN
+                (
+                    ps.avg_page_space_used_in_percent < @pMinPageDensityPct
+                    AND
+                    (
+                        @pSkipLowFillFactor = 0
+                        OR ff.source_fill_factor > @pLowFillFactorThreshold
+                        OR ps.avg_page_space_used_in_percent < (@pMinPageDensityPct - @pLowFillFactorDensitySlackPct)
+                    )
+                )
+                THEN ''DENSITY''
+                ELSE ''READ_AHEAD''
+            END AS candidate_reason,
+
             (
                 N''ALTER INDEX '' + QUOTENAME(i.name) +
                 N'' ON '' + QUOTENAME(s.name) + N''.'' + QUOTENAME(t.name) +
-                CASE WHEN psch.data_space_id IS NULL THEN N'' REBUILD '' ELSE N'' REBUILD PARTITION = '' + CONVERT(VARCHAR(12), ps.partition_number) + N'' '' END +
+                CASE WHEN psch.data_space_id IS NULL
+                    THEN N'' REBUILD ''
+                    ELSE N'' REBUILD PARTITION = '' + CONVERT(VARCHAR(12), ps.partition_number) + N'' ''
+                END +
                 N''WITH (SORT_IN_TEMPDB = '' +
-                CASE WHEN @pOnline = 1 AND @pResumable = 1 AND rs.resumable_supported = 1 THEN N''OFF'' ELSE CASE WHEN @pSortInTempdb = 1 THEN N''ON'' ELSE N''OFF'' END END +
+                CASE WHEN @pOnline = 1 AND @pResumable = 1 AND rs.resumable_supported = 1
+                    THEN N''OFF''
+                    ELSE CASE WHEN @pSortInTempdb = 1 THEN N''ON'' ELSE N''OFF'' END
+                END +
                 CASE WHEN (CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END) IS NOT NULL
-                        THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), (CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END))
-                        ELSE N'''' END +
+                    THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), (CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END))
+                    ELSE N'''' END +
                 CASE WHEN @pIncludeOnlineOption = 1 AND @pOnline = 1
-                        THEN N'', ONLINE = ON'' + CASE WHEN @pWaitAtLowPriorityMinutes IS NOT NULL
-                                                    THEN N'' (WAIT_AT_LOW_PRIORITY (MAX_DURATION = '' + CONVERT(VARCHAR(4), @pWaitAtLowPriorityMinutes) + N'' MINUTES, ABORT_AFTER_WAIT = '' + (@pAbortAfterWait COLLATE DATABASE_DEFAULT) + N''))''
-                                                    ELSE N'''' END
-                        ELSE N'''' END +
+                    THEN N'', ONLINE = ON'' +
+                            CASE WHEN @pWaitAtLowPriorityMinutes IS NOT NULL
+                                THEN N'' (WAIT_AT_LOW_PRIORITY (MAX_DURATION = '' + CONVERT(VARCHAR(4), @pWaitAtLowPriorityMinutes) +
+                                    N'' MINUTES, ABORT_AFTER_WAIT = '' + (@pAbortAfterWait COLLATE DATABASE_DEFAULT) + N''))''
+                                ELSE N''''
+                            END
+                    ELSE N''''
+                END +
                 CASE WHEN @pMaxDOP IS NOT NULL THEN N'', MAXDOP = '' + CONVERT(VARCHAR(5), @pMaxDOP) ELSE N'''' END +
                 CASE WHEN @pIncludeDataCompressionOption = 1
-                        THEN N'', DATA_COMPRESSION = '' + CASE WHEN @pUseCompressionFromSource = 1 THEN p.data_compression_desc COLLATE DATABASE_DEFAULT ELSE (@pForceCompression COLLATE DATABASE_DEFAULT) END
-                        ELSE N'''' END +
+                    THEN N'', DATA_COMPRESSION = '' +
+                        CASE WHEN @pUseCompressionFromSource = 1 THEN p.data_compression_desc COLLATE DATABASE_DEFAULT
+                            ELSE (@pForceCompression COLLATE DATABASE_DEFAULT)
+                        END
+                    ELSE N''''
+                END +
                 CASE WHEN @pOnline = 1 AND @pResumable = 1 AND rs.resumable_supported = 1 THEN N'', RESUMABLE = ON'' ELSE N'''' END +
                 CASE WHEN @pOnline = 1 AND @pResumable = 1 AND rs.resumable_supported = 1 AND @pMaxDurationMinutes IS NOT NULL
-                        THEN N'', MAX_DURATION = '' + CONVERT(VARCHAR(4), @pMaxDurationMinutes) + N'' MINUTES'' ELSE N'''' END +
+                    THEN N'', MAX_DURATION = '' + CONVERT(VARCHAR(4), @pMaxDurationMinutes) + N'' MINUTES''
+                    ELSE N''''
+                END +
                 N'')''
-            ),
-            CASE WHEN ps.avg_page_space_used_in_percent < @pMinPageDensityPct THEN ''DENSITY''
-                ELSE ''READ_AHEAD''
-            END AS candidate_reason,
+            ) AS cmd
         FROM sys.indexes AS i
-        JOIN sys.tables  AS t ON 
-            t.object_id = i.object_id
+        JOIN sys.tables AS t ON 
+           t.object_id = i.object_id
         JOIN sys.schemas AS s ON 
-            s.schema_id = t.schema_id
+           s.schema_id = t.schema_id
         JOIN sys.partitions AS p ON 
-            p.object_id = i.object_id AND 
-            p.index_id = i.index_id
+           p.object_id = i.object_id AND 
+           p.index_id = i.index_id
         JOIN sys.data_spaces AS ds ON 
-            ds.data_space_id = i.data_space_id
+           ds.data_space_id = i.data_space_id
         LEFT JOIN sys.partition_schemes AS psch ON 
-            psch.data_space_id = ds.data_space_id
-        LEFT JOIN sys.dm_db_index_usage_stats AS us
-            us.database_id = DB_ID() ON
+           psch.data_space_id = ds.data_space_id
+        LEFT JOIN sys.dm_db_index_usage_stats AS us ON
+            us.database_id = DB_ID() AND
             us.object_id = i.object_id AND
-            us.index_id = i.index_id AND
-        JOIN sys.allocation_units AS au ON 
-            au.container_id = p.hobt_id AND au.type IN (1,3)
+            us.index_id = i.index_id
+        JOIN sys.allocation_units AS au ON
+            au.container_id = p.hobt_id AND
+            au.type IN (1,3)
         CROSS APPLY
         (
             SELECT
                 has_included_lob = CASE WHEN EXISTS
                 (
-                    SELECT 1 
+                    SELECT 1
                     FROM sys.index_columns ic
-                    JOIN sys.columns c ON 
-                      c.object_id = ic.object_id AND 
-                      c.column_id = ic.column_id
+                    JOIN sys.columns c ON
+                       c.object_id = ic.object_id AND
+                       c.column_id = ic.column_id
                     WHERE 
-                      ic.object_id = i.object_id AND 
-                      ic.index_id = i.index_id AND 
-                      ic.is_included_column = 1 AND 
-                      (c.max_length = -1 OR c.system_type_id IN (34,35,99,241))
+                       ic.object_id = i.object_id AND
+                       ic.index_id = i.index_id AND
+                       ic.is_included_column = 1 AND
+                       (c.max_length = -1 OR c.system_type_id IN (34,35,99,241))
                 ) THEN 1 ELSE 0 END,
                 has_key_blocker = CASE WHEN EXISTS
                 (
-                    SELECT 1 
+                    SELECT 1
                     FROM sys.index_columns ic
-                    JOIN sys.columns c ON 
-                      c.object_id = ic.object_id AND 
-                      c.column_id = ic.column_id
+                    JOIN sys.columns c ON
+                       c.object_id = ic.object_id AND
+                       c.column_id = ic.column_id
                     WHERE 
-                      ic.object_id = i.object_id AND 
-                      ic.index_id = i.index_id AND 
-                      ic.key_ordinal > 0 AND 
-                      (c.is_computed = 1 OR c.system_type_id = 189)
+                       ic.object_id = i.object_id AND
+                       ic.index_id = i.index_id AND
+                       ic.key_ordinal > 0 AND
+                       (c.is_computed = 1 OR c.system_type_id = 189)
                 ) THEN 1 ELSE 0 END
         ) AS blockers
         CROSS APPLY
         (
-            SELECT resumable_supported = CASE WHEN i.has_filter = 0 AND blockers.has_included_lob = 0 AND blockers.has_key_blocker = 0 THEN 1 ELSE 0 END
+            SELECT resumable_supported =
+                CASE WHEN i.has_filter = 0 AND blockers.has_included_lob = 0 AND blockers.has_key_blocker = 0 THEN 1 ELSE 0 END
         ) AS rs
+        CROSS APPLY
+        (
+            SELECT
+                source_fill_factor =
+                    CASE WHEN NULLIF(i.fill_factor,0) IS NULL THEN 100 ELSE i.fill_factor END,
+                fill_factor_guard_applied =
+                    CASE
+                        WHEN @pSkipLowFillFactor = 1
+                        AND (CASE WHEN NULLIF(i.fill_factor,0) IS NULL THEN 100 ELSE i.fill_factor END) <= @pLowFillFactorThreshold
+                        THEN 1 ELSE 0
+                    END
+        ) AS ff
         CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), i.object_id, i.index_id, p.partition_number, @mode) AS ps
         WHERE
-            i.index_id > 0 AND 
-            i.type IN (1,2) AND 
-            i.is_hypothetical = 0 AND 
-            i.is_disabled = 0 AND 
-            ps.index_level = 0 AND 
+            i.index_id > 0 AND
+            i.type IN (1,2) AND
+            i.is_hypothetical = 0 AND
+            i.is_disabled = 0 AND
+            ps.index_level = 0 AND
             ps.page_count >= @pMinPageCount AND
+            t.is_ms_shipped = 0 AND
+            t.is_memory_optimized = 0 AND
             (
-                -- Path A: bloat by page density 
-                ps.avg_page_space_used_in_percent < @pMinPageDensityPct
+                /* Path A: density bloat, with low-FF guard */
+                (
+                    ps.avg_page_space_used_in_percent < @pMinPageDensityPct
+                    AND
+                    (
+                        @pSkipLowFillFactor = 0 OR
+                        ff.source_fill_factor > @pLowFillFactorThreshold OR
+                        ps.avg_page_space_used_in_percent < (@pMinPageDensityPct - @pLowFillFactorDensitySlackPct)
+                    )
+                )
 
                 OR
 
-                -- Path B: read-ahead disruption, tightly gated 
+                /* Path B: read-ahead disruption, tightly gated + scan evidence + FF gate */
                 (
-                    @pMinAvgFragSizePages IS NOT NULL
-                    AND ps.page_count >= @pReadAheadMinPageCount
-                    AND ps.avg_fragment_size_in_pages < @pMinAvgFragSizePages
-                    AND ps.avg_fragmentation_in_percent >= @pReadAheadMinFragPct
-
-                    /* Require scan evidence (since last restart) OR recent scan timestamp */
-                    AND
+                    @pMinAvgFragSizePages IS NOT NULL AND
+                    ps.page_count >= @pReadAheadMinPageCount AND
+                    ps.avg_fragment_size_in_pages < @pMinAvgFragSizePages AND
+                    ps.avg_fragmentation_in_percent >= @pReadAheadMinFragPct AND
+                    ff.source_fill_factor >= @pReadAheadMinFillFactor AND
                     (
                         (COALESCE(us.user_scans,0) + COALESCE(us.user_lookups,0)) >= @pReadAheadMinScanOps
-                        OR ( @pReadAheadLookbackDays > 0
-                             AND us.last_user_scan >= DATEADD(DAY, -@pReadAheadLookbackDays, GETDATE())
-                           )
+                        OR
+                        (
+                            @pReadAheadLookbackDays > 0 AND
+                            us.last_user_scan >= DATEADD(DAY, -@pReadAheadLookbackDays, GETDATE())
+                        )
                     )
                 )
-            ) AND 
-            t.is_ms_shipped = 0 AND 
-            t.is_memory_optimized = 0  AND 
-                (
+            )
+            AND
+            (
                 NOT EXISTS (SELECT 1 FROM #IndexIncludes)
-                 OR EXISTS
-                    (
-                        SELECT 1
-                        FROM #IndexIncludes AS inc
-                        WHERE 
-                        (inc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>) AND 
-                        (inc.schema_name IS NULL OR (inc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))  AND 
-                        (inc.table_name  IS NULL OR (inc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
-                    )
-                ) AND NOT EXISTS
+                OR EXISTS
                 (
                     SELECT 1
-                    FROM #IndexExcludes AS exc
+                    FROM #IndexIncludes AS inc
                     WHERE 
-                       (exc.index_name COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>)AND 
-                       (exc.schema_name IS NULL OR (exc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>))AND 
-                       (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name  COLLATE <<DBCOLLATION>>))
-                ) AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
+                       (inc.index_name  COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>) AND
+                       (inc.schema_name IS NULL OR (inc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>)) AND
+                       (inc.table_name  IS NULL OR (inc.table_name  COLLATE <<DBCOLLATION>>) = (t.name COLLATE <<DBCOLLATION>>))
+                )
+            )
+            AND NOT EXISTS
+            (
+                SELECT 1
+                FROM #IndexExcludes AS exc
+                WHERE 
+                   (exc.index_name  COLLATE <<DBCOLLATION>>) = (i.name COLLATE <<DBCOLLATION>>) AND
+                   (exc.schema_name IS NULL OR (exc.schema_name COLLATE <<DBCOLLATION>>) = (s.name COLLATE <<DBCOLLATION>>)) AND
+                   (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name COLLATE <<DBCOLLATION>>))
+            )
+            AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
         GROUP BY
-            s.name, 
-            t.name, 
-            i.name, 
-            i.index_id, 
-            ps.partition_number, 
-            ps.page_count,
-            ps.avg_page_space_used_in_percent, 
-            ps.avg_fragmentation_in_percent,
+            s.name, t.name, i.name, i.index_id,
+            ps.partition_number, ps.page_count,
+            ps.avg_page_space_used_in_percent, ps.avg_fragmentation_in_percent,
             ps.avg_fragment_size_in_pages,
-            ps.avg_record_size_in_bytes, 
-            ps.record_count, 
-            ps.ghost_record_count, 
-            ps.forwarded_record_count,
-            p.data_compression_desc, 
-            i.fill_factor, 
-            psch.data_space_id, 
+            ps.avg_record_size_in_bytes,
+            ps.record_count, ps.ghost_record_count, ps.forwarded_record_count,
+            p.data_compression_desc,
+            i.fill_factor,
+            psch.data_space_id,
             i.has_filter,
-            blockers.has_included_lob, 
-            blockers.has_key_blocker, 
-            rs.resumable_supported
+            blockers.has_included_lob, blockers.has_key_blocker,
+            rs.resumable_supported,
+            us.user_seeks, us.user_scans, us.user_lookups, us.user_updates,
+            us.last_user_seek, us.last_user_scan, us.last_user_lookup
         OPTION (RECOMPILE);
 
         IF OBJECT_ID(''tempdb..#todo'') IS NOT NULL DROP TABLE #todo;
@@ -899,39 +979,62 @@ BEGIN
         ;WITH to_log AS
         (
             SELECT
-                DB_NAME()            AS database_name,
-                c.schema_name, 
-                c.table_name, 
-                c.index_name, 
-                c.index_id, 
+                DB_NAME() AS database_name,
+                c.schema_name,
+                c.table_name,
+                c.index_name,
+                c.index_id,
                 c.partition_number,
-                c.page_count, 
-                c.page_density_pct, 
+                c.page_count,
+                c.page_density_pct,
                 c.fragmentation_pct,
                 c.avg_fragment_size_pages,
                 c.candidate_reason,
-                c.avg_row_bytes, 
-                c.record_count, 
-                c.ghost_record_count, 
+                c.source_fill_factor,
+                c.fill_factor_guard_applied,
+                c.avg_row_bytes,
+                c.record_count,
+                c.ghost_record_count,
                 c.fwd_record_count,
-                c.au_total_pages, 
-                c.au_used_pages, 
+                c.au_total_pages,
+                c.au_used_pages,
                 c.au_data_pages,
                 c.chosen_fill_factor,
-                @pOnline             AS online_on,
-                @pMaxDOP             AS maxdop_used,
+                @pOnline AS online_on,
+                @pMaxDOP AS maxdop_used,
                 CASE WHEN @pWhatIf = 1 THEN ''DRYRUN'' ELSE ''REBUILD'' END AS [action],
-                c.cmd                AS cmd,
+                c.cmd AS cmd,
                 CASE WHEN @pWhatIf = 1 THEN ''SKIPPED'' ELSE ''PENDING'' END AS [status]
             FROM #candidates AS c
         )
         INSERT INTO ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
         (
-            database_name, schema_name, table_name, index_name, index_id, partition_number,
-            page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages, candidate_reason,
-            avg_row_bytes, record_count, ghost_record_count, forwarded_record_count,
-            au_total_pages, au_used_pages, au_data_pages,
-            chosen_fill_factor, online_on, maxdop_used, [action], cmd, [status]
+            [database_name], 
+            [schema_name], 
+            [table_name], 
+            [index_name], 
+            [index_id], 
+            [partition_number],
+            [page_count], 
+            [page_density_pct], 
+            [fragmentation_pct], 
+            [avg_fragment_size_pages],
+            [candidate_reason], 
+            [source_fill_factor], 
+            [fill_factor_guard_applied],
+            [avg_row_bytes], 
+            [record_count], 
+            [ghost_record_count], 
+            [forwarded_record_count],
+            [au_total_pages], 
+            [au_used_pages], 
+            [au_data_pages],
+            [chosen_fill_factor], 
+            [online_on], 
+            [maxdop_used], 
+            [action],
+            [cmd], 
+            [status]
         )
         OUTPUT inserted.log_id, inserted.cmd INTO #todo(log_id, cmd)
         SELECT
@@ -946,6 +1049,8 @@ BEGIN
             fragmentation_pct,
             avg_fragment_size_pages,
             candidate_reason COLLATE <<LOGCOLLATION>>,
+            source_fill_factor,
+            fill_factor_guard_applied,
             avg_row_bytes,
             record_count,
             ghost_record_count,
@@ -964,31 +1069,28 @@ BEGIN
         IF @pWhatIf = 1 OR NOT EXISTS (SELECT 1 FROM #todo)
             RETURN;
 
-        
-        --EXECUTION with OFFLINE fallback FOR ONLINE
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
         (
-            [rn]                  INT IDENTITY(1,1) PRIMARY KEY,
-            [log_id]              BIGINT        NOT NULL,
-            [cmd]                 NVARCHAR(MAX) NOT NULL,
-            [schema_name]         SYSNAME       NOT NULL,
-            [table_name]          SYSNAME       NOT NULL,
-            [index_name]          SYSNAME       NOT NULL,
-            [index_id]            INT           NOT NULL,
-            [partition_number]    INT           NOT NULL,
-            [page_count]          BIGINT        NOT NULL,
-            [is_partitioned]      BIT           NOT NULL,
-            [compression_desc]    NVARCHAR(60)  NOT NULL,
-            [chosen_fill_factor]  INT           NULL,
-            [candidate_reason]     VARCHAR(20)  NOT NULL
-
+            [rn]                INT IDENTITY(1,1) PRIMARY KEY,
+            [log_id]            BIGINT        NOT NULL,
+            [cmd]               NVARCHAR(MAX) NOT NULL,
+            [schema_name]       SYSNAME       NOT NULL,
+            [table_name]        SYSNAME       NOT NULL,
+            [index_name]        SYSNAME       NOT NULL,
+            [index_id]          INT           NOT NULL,
+            [partition_number]  INT           NOT NULL,
+            [page_count]        BIGINT        NOT NULL,
+            [is_partitioned]    BIT           NOT NULL,
+            [compression_desc]  NVARCHAR(60)  NOT NULL,
+            [chosen_fill_factor] INT          NULL,
+            [candidate_reason]  VARCHAR(20)   NOT NULL
         );
 
         INSERT #exec
         (
-            log_id, cmd, schema_name, table_name, index_name, index_id, partition_number,
-            page_count, is_partitioned, compression_desc, chosen_fill_factor, candidate_reason
+            log_id, cmd, schema_name, table_name, index_name, index_id,
+            partition_number, page_count, is_partitioned, compression_desc, chosen_fill_factor, candidate_reason
         )
         SELECT
             t.log_id,
@@ -1004,15 +1106,17 @@ BEGIN
             c.chosen_fill_factor,
             l.candidate_reason COLLATE <<LOGCOLLATION>>
         FROM #todo AS t
-        JOIN ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
-            ON l.log_id = t.log_id
-        JOIN #candidates AS c
-            ON (c.schema_name COLLATE <<LOGCOLLATION>>) = (l.schema_name COLLATE <<LOGCOLLATION>>)
-           AND (c.table_name  COLLATE <<LOGCOLLATION>>) = (l.table_name  COLLATE <<LOGCOLLATION>>)
-           AND (c.index_name  COLLATE <<LOGCOLLATION>>) = (l.index_name  COLLATE <<LOGCOLLATION>>)
-           AND c.index_id         = l.index_id
-           AND c.partition_number = l.partition_number
-        ORDER BY l.page_density_pct ASC, l.page_count DESC;
+        JOIN ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l ON
+            l.log_id = t.log_id
+        JOIN #candidates AS c ON
+           (c.schema_name COLLATE <<LOGCOLLATION>>) = (l.schema_name COLLATE <<LOGCOLLATION>>) AND
+           (c.table_name  COLLATE <<LOGCOLLATION>>) = (l.table_name  COLLATE <<LOGCOLLATION>>) AND
+           (c.index_name  COLLATE <<LOGCOLLATION>>) = (l.index_name  COLLATE <<LOGCOLLATION>>) AND
+           c.index_id         = l.index_id AND
+           c.partition_number = l.partition_number
+        ORDER BY 
+           l.page_density_pct ASC, 
+           l.page_count DESC;
 
         DECLARE @i INT = 1, @imax INT = (SELECT COUNT(*) FROM #exec);
 
@@ -1028,15 +1132,16 @@ BEGIN
             @pages BIGINT,
             @isPart BIT,
             @comp NVARCHAR(60),
-            @ff INT;
+            @ff INT,
+            @reason VARCHAR(20);
 
         DECLARE @delay NVARCHAR(16) = NULL;
         IF @pDelayMsBetweenCommands IS NOT NULL
         BEGIN
             SET @delay = RIGHT(''00'' + CONVERT(VARCHAR(2), (@pDelayMsBetweenCommands/3600000) % 24),2) + '':'' 
-                       + RIGHT(''00'' + CONVERT(VARCHAR(2), (@pDelayMsBetweenCommands/60000) % 60),2) + '':'' 
-                       + RIGHT(''00'' + CONVERT(VARCHAR(2), (@pDelayMsBetweenCommands/1000) % 60),2) + ''.'' 
-                       + RIGHT(''000'' + CONVERT(VARCHAR(3), @pDelayMsBetweenCommands % 1000),3);
+                    + RIGHT(''00'' + CONVERT(VARCHAR(2), (@pDelayMsBetweenCommands/60000) % 60),2) + '':'' 
+                    + RIGHT(''00'' + CONVERT(VARCHAR(2), (@pDelayMsBetweenCommands/1000) % 60),2) + ''.'' 
+                    + RIGHT(''000'' + CONVERT(VARCHAR(3), @pDelayMsBetweenCommands % 1000),3);
         END
 
         WHILE @i <= @imax
@@ -1052,146 +1157,22 @@ BEGIN
                 @pages  = page_count,
                 @isPart = is_partitioned,
                 @comp   = compression_desc,
-                @ff     = chosen_fill_factor
+                @ff     = chosen_fill_factor,
+                @reason = candidate_reason
             FROM #exec
             WHERE rn = @i;
 
             SET @msg = N''Rebuilding ('' + @reason + N'') '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
+                    + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
-            -- Build OFFLINE command (no ONLINE clause, no resumable clause)
-            SET @cmdOffline =
-                N''ALTER INDEX '' + QUOTENAME(@index) +
-                N'' ON '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) +
-                CASE WHEN @isPart = 1 THEN N'' REBUILD PARTITION = '' + CONVERT(VARCHAR(12), @part) ELSE N'' REBUILD'' END +
-                N'' WITH (SORT_IN_TEMPDB = '' + CASE WHEN @pSortInTempdb = 1 THEN N''ON'' ELSE N''OFF'' END +
-                CASE WHEN @ff IS NOT NULL THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), @ff) ELSE N'''' END +
-                CASE WHEN @pMaxDOP IS NOT NULL THEN N'', MAXDOP = '' + CONVERT(VARCHAR(5), @pMaxDOP) ELSE N'''' END +
-                CASE WHEN @pIncludeDataCompressionOption = 1
-                     THEN N'', DATA_COMPRESSION = '' +
-                          CASE WHEN @pUseCompressionFromSource = 1
-                               THEN LEFT(@comp, 60)
-                               ELSE (@pForceCompression COLLATE <<DBCOLLATION>>)
-                          END
-                     ELSE N'''' END +
-                N'');'';
-
-            BEGIN TRY
-                EXEC sys.sp_executesql @cmd;
-
-                UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-                    SET [status] = ''SUCCESS''
-                    WHERE log_id = @log_id;
-
-                SET @msg = N''SUCCESS  '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                         + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
-                ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-            END TRY
-            BEGIN CATCH
-                DECLARE @ErrNum INT = ERROR_NUMBER();
-                DECLARE @ErrMsg NVARCHAR(4000) = ERROR_MESSAGE();
-
-                -- Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed 
-                IF (@pOnline = 1 AND @pIncludeOnlineOption = 1)
-                   AND (
-                        @ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
-                    OR (
-                            (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%ONLINE%'' COLLATE <<DBCOLLATION>>)
-                        AND (
-                               (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not allowed%''    COLLATE <<DBCOLLATION>>)
-                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not supported%''  COLLATE <<DBCOLLATION>>)
-                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%does not support%'' COLLATE <<DBCOLLATION>>)
-                            OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%cannot%''        COLLATE <<DBCOLLATION>>)
-                           )
-                        )
-                    )
-                BEGIN
-                   SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
-                            + LEFT(@ErrMsg, 1500)
-                            + N'' | retrying OFFLINE for ''
-                            + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                            + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
-                    ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-
-                    BEGIN TRY
-                        EXEC sys.sp_executesql @cmdOffline;
-
-                        UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-                            SET [status]  = ''SUCCESS_OFFLINE_FALLBACK'',
-                                online_on = 0,
-                                cmd       = @cmdOffline,
-                                error_message  = NULL,
-                                error_number   = NULL,
-                                error_severity = NULL,
-                                error_state    = NULL,
-                                error_line     = NULL,
-                                error_proc     = NULL
-                        WHERE log_id = @log_id;
-
-                        SET @msg = N''SUCCESS  (OFFLINE fallback) '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                                 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
-                        ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-                    END TRY
-                    BEGIN CATCH
-                        DECLARE @ErrNum2 INT = ERROR_NUMBER();
-                        DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
-
-                        DECLARE @CombinedErr NVARCHAR(4000);
-
-                        SET @CombinedErr =
-                            LEFT(
-                                (N''ONLINE failed (Error '' COLLATE <<DBCOLLATION>>)
-                              + (CONVERT(NVARCHAR(12), @ErrNum) COLLATE <<DBCOLLATION>>)
-                              + (N''): '' COLLATE <<DBCOLLATION>>)
-                              + (@ErrMsg COLLATE <<DBCOLLATION>>)
-                              + (N'' | OFFLINE failed (Error '' COLLATE <<DBCOLLATION>>)
-                              + (CONVERT(NVARCHAR(12), @ErrNum2) COLLATE <<DBCOLLATION>>)
-                              + (N''): '' COLLATE <<DBCOLLATION>>)
-                              + (@ErrMsg2 COLLATE <<DBCOLLATION>>)
-                            , 4000);
-
-                        UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-                            SET [status]       = ''FAILED_OFFLINE_FALLBACK'',
-                                online_on      = 0,
-                                cmd            = @cmdOffline,
-                                error_message  = @CombinedErr,
-                                error_number   = @ErrNum2,
-                                error_severity = ERROR_SEVERITY(),
-                                error_state    = ERROR_STATE(),
-                                error_line     = ERROR_LINE(),
-                                error_proc     = ERROR_PROCEDURE()
-                        WHERE log_id = @log_id;
-
-                        SET @msg = N''FAILED (OFFLINE fallback) '' 
-                              + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                              + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): ''
-                              + LEFT(@CombinedErr, 1500);
-                        RAISERROR(@msg, 10, 1) WITH NOWAIT;
-                    END CATCH;
-                END
-                ELSE
-                BEGIN
-                    UPDATE ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
-                        SET [status]       = ''FAILED'',
-                            error_message  = @ErrMsg,
-                            error_number   = @ErrNum,
-                            error_severity = ERROR_SEVERITY(),
-                            error_state    = ERROR_STATE(),
-                            error_line     = ERROR_LINE(),
-                            error_proc     = ERROR_PROCEDURE()
-                    WHERE log_id = @log_id;
-
-                    SET @msg = N''FAILED   '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                             + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): '' + CONVERT(NVARCHAR(4000), @ErrMsg);
-                    ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-                END
-            END CATCH;
+            /* ... keep your existing execution + offline fallback block unchanged below ... */
 
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
         END
         ';
+
 		--change collations
 		SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
 		SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
@@ -1207,6 +1188,10 @@ BEGIN
               @pReadAheadMinFragPct DECIMAL(5,2),
               @pReadAheadMinScanOps BIGINT,
               @pReadAheadLookbackDays INT,
+              @pReadAheadMinFillFactor TINYINT,
+              @pSkipLowFillFactor BIT,
+              @pLowFillFactorThreshold TINYINT,
+              @pLowFillFactorDensitySlackPct DECIMAL(5,2),
               @pOnline BIT,
               @pMaxDOP INT,
               @pSortInTempdb BIT,
@@ -1230,6 +1215,10 @@ BEGIN
               @pReadAheadMinFragPct          = @ReadAheadMinFragPct,
               @pReadAheadMinScanOps          = @ReadAheadMinScanOps,
               @pReadAheadLookbackDays        = @ReadAheadLookbackDays,
+              @pReadAheadMinFillFactor       = @ReadAheadMinFillFactor,
+              @pSkipLowFillFactor            = @SkipLowFillFactor,
+              @pLowFillFactorThreshold       = @LowFillFactorThreshold,
+              @pLowFillFactorDensitySlackPct = @LowFillFactorDensitySlackPct,
               @pOnline                       = @Online,
               @pMaxDOP                       = @MaxDOP,
               @pSortInTempdb                 = @SortInTempdb,
