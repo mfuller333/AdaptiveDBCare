@@ -503,11 +503,9 @@ BEGIN
                 [page_density_pct]        DECIMAL(6,2)   NOT NULL,
                 [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
                 [avg_fragment_size_pages] DECIMAL(18,2)  NULL,
-
                 [candidate_reason]        VARCHAR(20)    NOT NULL CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY''),
                 [source_fill_factor]      INT            NULL,
                 [fill_factor_guard_applied] BIT          NOT NULL CONSTRAINT DF_IBRL_ffguard DEFAULT (0),
-
                 [chosen_fill_factor]      INT            NULL,
                 [online_on]               BIT            NOT NULL,
                 [maxdop_used]             INT            NULL,
@@ -691,7 +689,6 @@ BEGIN
             [au_total_pages]            BIGINT        NOT NULL,
             [au_used_pages]             BIGINT        NOT NULL,
             [au_data_pages]             BIGINT        NOT NULL,
-
             [user_seeks]                BIGINT        NOT NULL,
             [user_scans]                BIGINT        NOT NULL,
             [user_lookups]              BIGINT        NOT NULL,
@@ -699,19 +696,15 @@ BEGIN
             [last_user_seek]            DATETIME      NULL,
             [last_user_scan]            DATETIME      NULL,
             [last_user_lookup]          DATETIME      NULL,
-
             [compression_desc]          NVARCHAR(60)  NOT NULL,
-
             [source_fill_factor]        INT           NOT NULL,
             [fill_factor_guard_applied] BIT           NOT NULL,
-
             [chosen_fill_factor]        INT           NULL,
             [is_partitioned]            BIT           NOT NULL,
             [is_filtered]               BIT           NOT NULL,
             [has_included_lob]          BIT           NOT NULL,
             [has_key_blocker]           BIT           NOT NULL,
             [resumable_supported]       BIT           NOT NULL,
-
             [candidate_reason]          VARCHAR(20)   NOT NULL,
             [cmd]                       NVARCHAR(MAX) NOT NULL
         );
@@ -721,18 +714,40 @@ BEGIN
 
         INSERT INTO #candidates
         (
-            schema_name, table_name, index_name, index_id,
-            partition_number, page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages,
-            avg_row_bytes, record_count, ghost_record_count, fwd_record_count,
-            au_total_pages, au_used_pages, au_data_pages,
-            user_seeks, user_scans, user_lookups, user_updates,
-            last_user_seek, last_user_scan, last_user_lookup,
-            compression_desc,
-            source_fill_factor, fill_factor_guard_applied,
-            chosen_fill_factor,
-            is_partitioned, is_filtered, has_included_lob, has_key_blocker, resumable_supported,
-            candidate_reason,
-            cmd
+            [schema_name], 
+            [table_name], 
+            [index_name], 
+            [index_id],
+            [partition_number], 
+            [page_count], 
+            [page_density_pct], 
+            [fragmentation_pct], 
+            [avg_fragment_size_pages],
+            [avg_row_bytes], 
+            [record_count], 
+            [ghost_record_count], 
+            [fwd_record_count],
+            [au_total_pages], 
+            [au_used_pages], 
+            [au_data_pages],
+            [user_seeks], 
+            [user_scans], 
+            [user_lookups], 
+            [user_updates],
+            [last_user_seek], 
+            [last_user_scan], 
+            [last_user_lookup],
+            [compression_desc],
+            [source_fill_factor], 
+            [fill_factor_guard_applied],
+            [chosen_fill_factor],
+            [is_partitioned], 
+            [is_filtered], 
+            [has_included_lob], 
+            [has_key_blocker], 
+            [resumable_supported],
+            [candidate_reason],
+            [cmd]
         )
         SELECT
             s.name,
@@ -751,7 +766,6 @@ BEGIN
             COALESCE(SUM(au.total_pages),0),
             COALESCE(SUM(au.used_pages),0),
             COALESCE(SUM(au.data_pages),0),
-
             COALESCE(us.user_seeks,   0),
             COALESCE(us.user_scans,   0),
             COALESCE(us.user_lookups, 0),
@@ -759,12 +773,9 @@ BEGIN
             us.last_user_seek,
             us.last_user_scan,
             us.last_user_lookup,
-
             p.data_compression_desc,
-
             ff.source_fill_factor,
             ff.fill_factor_guard_applied,
-
             CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END,
             CASE WHEN psch.data_space_id IS NULL THEN 0 ELSE 1 END,
             i.has_filter,
@@ -903,7 +914,7 @@ BEGIN
             t.is_ms_shipped = 0 AND
             t.is_memory_optimized = 0 AND
             (
-                /* Path A: density bloat, with low-FF guard */
+                --Path A: density bloat, with low-FF guard 
                 (
                     ps.avg_page_space_used_in_percent < @pMinPageDensityPct
                     AND
@@ -916,7 +927,7 @@ BEGIN
 
                 OR
 
-                /* Path B: read-ahead disruption, tightly gated + scan evidence + FF gate */
+                -- Path B: read-ahead disruption, tightly gated + scan evidence + FF gate 
                 (
                     @pMinAvgFragSizePages IS NOT NULL AND
                     ps.page_count >= @pReadAheadMinPageCount AND
@@ -957,20 +968,35 @@ BEGIN
             )
             AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
         GROUP BY
-            s.name, t.name, i.name, i.index_id,
-            ps.partition_number, ps.page_count,
-            ps.avg_page_space_used_in_percent, ps.avg_fragmentation_in_percent,
+            s.name, 
+			t.name, 
+			i.name, 
+			i.index_id,
+            ps.partition_number, 
+			ps.page_count,
+            ps.avg_page_space_used_in_percent, 
+			ps.avg_fragmentation_in_percent,
             ps.avg_fragment_size_in_pages,
             ps.avg_record_size_in_bytes,
-            ps.record_count, ps.ghost_record_count, ps.forwarded_record_count,
+            ps.record_count, 
+			ps.ghost_record_count, 
+			ps.forwarded_record_count,
             p.data_compression_desc,
             i.fill_factor,
             psch.data_space_id,
             i.has_filter,
-            blockers.has_included_lob, blockers.has_key_blocker,
+            blockers.has_included_lob, 
+			blockers.has_key_blocker,
             rs.resumable_supported,
-            us.user_seeks, us.user_scans, us.user_lookups, us.user_updates,
-            us.last_user_seek, us.last_user_scan, us.last_user_lookup
+            us.user_seeks, 
+			us.user_scans, 
+			us.user_lookups, 
+			us.user_updates,
+            us.last_user_seek, 
+			us.last_user_scan, 
+			us.last_user_lookup,
+			ff.source_fill_factor,
+            ff.fill_factor_guard_applied
         OPTION (RECOMPILE);
 
         IF OBJECT_ID(''tempdb..#todo'') IS NOT NULL DROP TABLE #todo;
@@ -1038,31 +1064,31 @@ BEGIN
         )
         OUTPUT inserted.log_id, inserted.cmd INTO #todo(log_id, cmd)
         SELECT
-            database_name COLLATE <<LOGCOLLATION>>,
-            schema_name   COLLATE <<LOGCOLLATION>>,
-            table_name    COLLATE <<LOGCOLLATION>>,
-            index_name    COLLATE <<LOGCOLLATION>>,
-            index_id,
-            partition_number,
-            page_count,
-            page_density_pct,
-            fragmentation_pct,
-            avg_fragment_size_pages,
-            candidate_reason COLLATE <<LOGCOLLATION>>,
-            source_fill_factor,
-            fill_factor_guard_applied,
-            avg_row_bytes,
-            record_count,
-            ghost_record_count,
-            fwd_record_count,
-            au_total_pages,
-            au_used_pages,
-            au_data_pages,
-            chosen_fill_factor,
-            online_on,
-            maxdop_used,
+            [database_name] COLLATE <<LOGCOLLATION>>,
+            [schema_name]   COLLATE <<LOGCOLLATION>>,
+            [table_name]    COLLATE <<LOGCOLLATION>>,
+            [index_name]    COLLATE <<LOGCOLLATION>>,
+            [index_id],
+            [partition_number],
+            [page_count],
+            [page_density_pct],
+            [fragmentation_pct],
+            [avg_fragment_size_pages],
+            [candidate_reason] COLLATE <<LOGCOLLATION>>,
+            [source_fill_factor],
+            [fill_factor_guard_applied],
+            [avg_row_bytes],
+            [record_count],
+            [ghost_record_count],
+            [fwd_record_count],
+            [au_total_pages],
+            [au_used_pages],
+            [au_data_pages],
+            [chosen_fill_factor],
+            [online_on],
+            [maxdop_used],
             [action] COLLATE <<LOGCOLLATION>>,
-            cmd      COLLATE <<LOGCOLLATION>>,
+            [cmd]      COLLATE <<LOGCOLLATION>>,
             [status] COLLATE <<LOGCOLLATION>>
         FROM to_log;
 
@@ -1147,17 +1173,17 @@ BEGIN
         WHILE @i <= @imax
         BEGIN
             SELECT
-                @cmd    = cmd,
+                @cmd = cmd,
                 @log_id = log_id,
                 @schema = schema_name,
-                @table  = table_name,
-                @index  = index_name,
-                @idxId  = index_id,
-                @part   = partition_number,
-                @pages  = page_count,
+                @table = table_name,
+                @index = index_name,
+                @idxId = index_id,
+                @part = partition_number,
+                @pages = page_count,
                 @isPart = is_partitioned,
-                @comp   = compression_desc,
-                @ff     = chosen_fill_factor,
+                @comp = compression_desc,
+                @ff = chosen_fill_factor,
                 @reason = candidate_reason
             FROM #exec
             WHERE rn = @i;
@@ -1165,8 +1191,6 @@ BEGIN
             SET @msg = N''Rebuilding ('' + @reason + N'') '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
-
-            /* ... keep your existing execution + offline fallback block unchanged below ... */
 
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
