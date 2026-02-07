@@ -660,8 +660,6 @@ BEGIN
 
 		
         --Core per-DB logic with progress
-        --CHANGE: execution now retries OFFLINE when ONLINE fails for ONLINE-not-supported reasons.
-        --SQL 2014 compatible (no RESUMABLE usage unless the cmd includes it; fallback ignores that path).
         DECLARE @sql NVARCHAR(MAX) =
         N'USE ' + @qDb + N';
         SET NOCOUNT ON;
@@ -1144,8 +1142,18 @@ BEGIN
 
         INSERT #exec
         (
-            log_id, cmd, schema_name, table_name, index_name, index_id,
-            partition_number, page_count, is_partitioned, compression_desc, chosen_fill_factor, candidate_reason
+            [log_id], 
+            [cmd], 
+            [schema_name], 
+            [table_name], 
+            [index_name], 
+            [index_id],
+            [partition_number], 
+            [page_count], 
+            [is_partitioned], 
+            [compression_desc], 
+            [chosen_fill_factor], 
+            [candidate_reason]
         )
         SELECT
             t.log_id,
