@@ -60,7 +60,11 @@ ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Indexes                    NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
       @MinPageDensityPct          DECIMAL(5,2)  = 70.0,
       @MinPageCount               INT           = 1000,
-      @MinAvgFragmentSizePages    INT           = 8, 
+      @MinAvgFragmentSizePages    INT           = 8,
+      @ReadAheadMinPageCount      INT           = 50000,      -- read-ahead path: only consider large leaf partitions
+      @ReadAheadMinFragPct        DECIMAL(5,2)  = 30.0,       -- read-ahead path: avoid trivial fragmentation noise
+      @ReadAheadMinScanOps        BIGINT        = 1000,       -- read-ahead path: require scan evidence (since last restart)
+      @ReadAheadLookbackDays      INT           = 7,          -- read-ahead path: accept recent last_user_scan 
       @UseExistingFillFactor      BIT           = 1,
       @FillFactor                 TINYINT       = NULL,
       @Online                     BIT           = 1,
@@ -90,25 +94,29 @@ BEGIN
         FROM (VALUES
              (N'@TargetDatabases',          N'NVARCHAR(MAX)',  N'(required)',      N'CSV list or **ALL_USER_DBS** (exact case). Supports exclusions via -DbName. System DBs and distribution are always excluded.', N'@TargetDatabases = N''ALL_USER_DBS,-DW,-ReportServer'''),
              (N'@Indexes',                  N'NVARCHAR(MAX)',  N'''ALL_INDEXES''', N'Single DB only (not ALL_USER_DBS). ALL_INDEXES or CSV of dbo.IndexName OR dbo.Table.IndexName. Prefix with - to exclude. Brackets ok.', N'@Indexes = N''dbo.IX_BigTable,dbo.BigTable.IX_BigTable_Cold,-dbo.BigTable.IX_BadOne'''),
-             (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.',                                   N'65.0'),
-             (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.',                                                                 N'500'),
+             (N'@MinPageDensityPct',        N'DECIMAL(5,2)',   N'70.0',            N'Rebuild when avg page density for a leaf partition is below this percent.', N'65.0'),
+             (N'@MinPageCount',             N'INT',            N'1000',            N'Skip tiny partitions below this page count.', N'500'),
              (N'@MinAvgFragmentSizePages',  N'INT',            N'8',               N'Rebuild when dm_db_index_physical_stats avg_fragment_size_in_pages is below this (SSD read-ahead indicator). Set NULL to disable.', N'8'),
-             (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.',                                              N'1'),
-             (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.',                                                N'90'),
-             (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.',                                                                             N'1'),
-             (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.',                                                       N'4'),
-             (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.',                                                                                         N'1'),
-             (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.',                                                 N'1'),
-             (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).',                                N'N''ROW'''),
-             (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.',                                                       N'''DETAILED'''),
-             (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.',               N'1'),
-             (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.',                                                            N'N''UtilityDb'''),
-             (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).',                                                   N'5'),
-             (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).',                                               N'N''BLOCKERS'''),
-             (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).',                                              N'1'),
-             (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.',                                                                             N'60'),
-             (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.',                                                            N'5000'),
-             (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.',                                                                                    N'0')
+             (N'@ReadAheadMinPageCount',    N'INT',            N'50000',           N'Read-ahead path: minimum page_count required to consider avg_fragment_size_in_pages.', N'50000'),
+             (N'@ReadAheadMinFragPct',      N'DECIMAL(5,2)',   N'20.0',            N'Read-ahead path: minimum avg_fragmentation_in_percent required to reduce false positives.', N'20.0'),
+             (N'@ReadAheadMinScanOps',      N'BIGINT',         N'1000',            N'Read-ahead path: minimum (user_scans + user_lookups) from dm_db_index_usage_stats (since last restart).', N'1000'),
+             (N'@ReadAheadLookbackDays',    N'INT',            N'7',               N'Read-ahead path: accept if last_user_scan is within this many days (helps even if scan counts are low).', N'7'),
+             (N'@UseExistingFillFactor',    N'BIT',            N'1',               N'Keep each index''s current fill factor. If 0, use @FillFactor.', N'1'),
+             (N'@FillFactor',               N'TINYINT',        N'NULL',            N'Fill factor when @UseExistingFillFactor = 0. Valid 1 to 100.', N'90'),
+             (N'@Online',                   N'BIT',            N'1',               N'Use ONLINE = ON when supported.', N'1'),
+             (N'@MaxDOP',                   N'INT',            N'NULL',            N'MAXDOP for rebuilds. If NULL, server default is used.', N'4'),
+             (N'@SortInTempdb',             N'BIT',            N'1',               N'Use SORT_IN_TEMPDB.', N'1'),
+             (N'@UseCompressionFromSource', N'BIT',            N'1',               N'Preserve DATA_COMPRESSION of each partition when supported.', N'1'),
+             (N'@ForceCompression',         N'NVARCHAR(20)',   N'NULL',            N'Override compression for rowstore: NONE, ROW, or PAGE (when not preserving).', N'N''ROW'''),
+             (N'@SampleMode',               N'VARCHAR(16)',    N'''SAMPLED''',     N'dm_db_index_physical_stats mode: SAMPLED or DETAILED.', N'''DETAILED'''),
+             (N'@CaptureTrendingSignals',   N'BIT',            N'0',               N'If 1 and SampleMode=SAMPLED, auto-upshift to DETAILED to capture row/ghost/forwarded metrics.', N'1'),
+             (N'@LogDatabase',              N'SYSNAME',        N'NULL',            N'Central log DB. If NULL, logs in each target DB.', N'N''UtilityDb'''),
+             (N'@WaitAtLowPriorityMinutes', N'INT',            N'NULL',            N'Optional WAIT_AT_LOW_PRIORITY MAX_DURATION (ONLINE only).', N'5'),
+             (N'@AbortAfterWait',           N'NVARCHAR(20)',   N'NULL',            N'ABORT_AFTER_WAIT: NONE, SELF, or BLOCKERS (requires minutes).', N'N''BLOCKERS'''),
+             (N'@Resumable',                N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).', N'1'),
+             (N'@MaxDurationMinutes',       N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.', N'60'),
+             (N'@DelayMsBetweenCommands',   N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.', N'5000'),
+             (N'@WhatIf',                   N'BIT',            N'1',               N'Dry run: log/print only.', N'0')
         ) d(param_name, sql_type, default_value, description, example)
         ORDER BY param_name;
 
@@ -167,6 +175,18 @@ BEGIN
 
     IF @MinAvgFragmentSizePages IS NOT NULL AND @MinAvgFragmentSizePages <= 0
     BEGIN RAISERROR('@MinAvgFragmentSizePages must be NULL or a positive integer.',16,1); RETURN; END
+
+    IF @ReadAheadMinPageCount IS NULL OR @ReadAheadMinPageCount <= 0
+    BEGIN RAISERROR('@ReadAheadMinPageCount must be a positive integer.',16,1); RETURN; END
+
+    IF @ReadAheadMinFragPct IS NULL OR @ReadAheadMinFragPct < 0 OR @ReadAheadMinFragPct >= 100
+    BEGIN RAISERROR('@ReadAheadMinFragPct must be between 0 and 100.',16,1); RETURN; END
+
+    IF @ReadAheadMinScanOps IS NULL OR @ReadAheadMinScanOps < 0
+    BEGIN RAISERROR('@ReadAheadMinScanOps must be >= 0.',16,1); RETURN; END
+
+    IF @ReadAheadLookbackDays IS NULL OR @ReadAheadLookbackDays < 0
+    BEGIN RAISERROR('@ReadAheadLookbackDays must be >= 0.',16,1); RETURN; END
 
     IF @UseExistingFillFactor = 0 AND ( @FillFactor IS NULL OR @FillFactor NOT BETWEEN 1 AND 100 )
     BEGIN RAISERROR('When @UseExistingFillFactor = 0, @FillFactor must be 1-100.',16,1); RETURN; END
@@ -468,6 +488,7 @@ BEGIN
                   [page_density_pct]        DECIMAL(6,2)   NOT NULL,
                   [fragmentation_pct]       DECIMAL(6,2)   NOT NULL,
                   [avg_fragment_size_pages] DECIMAL(18,2)  NULL,
+                  [candidate_reason]        VARCHAR(20)    NOT NULL CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY''),
                   [chosen_fill_factor]      INT            NULL,
                   [online_on]               BIT            NOT NULL,
                   [maxdop_used]             INT            NULL,
@@ -574,6 +595,19 @@ BEGIN
                  BEGIN
                      ALTER TABLE [DBA].[IndexBloatRebuildLog] ADD [avg_fragment_size_pages] DECIMAL(18,2) NULL;
                  END
+                IF NOT EXISTS
+                (
+                    SELECT 1
+                    FROM sys.columns
+                    WHERE
+                        object_id = OBJECT_ID(N''[DBA].[IndexBloatRebuildLog]'')
+                        AND name = N''candidate_reason''
+                )
+                BEGIN
+                    ALTER TABLE [DBA].[IndexBloatRebuildLog]
+                        ADD [candidate_reason] VARCHAR(20) NOT NULL
+                            CONSTRAINT DF_IBRL_reason DEFAULT (''DENSITY'');
+                END
             END
             ';
 
@@ -619,6 +653,13 @@ BEGIN
             [au_total_pages]          BIGINT        NOT NULL,
             [au_used_pages]           BIGINT        NOT NULL,
             [au_data_pages]           BIGINT        NOT NULL,
+            [user_seeks]              BIGINT        NOT NULL,
+            [user_scans]              BIGINT        NOT NULL,
+            [user_lookups]            BIGINT        NOT NULL,
+            [user_updates]            BIGINT        NOT NULL,
+            [last_user_seek]          DATETIME      NULL,
+            [last_user_scan]          DATETIME      NULL,
+            [last_user_lookup]        DATETIME      NULL,
             [compression_desc]        NVARCHAR(60)  NOT NULL,
             [chosen_fill_factor]      INT           NULL,
             [is_partitioned]          BIT           NOT NULL,
@@ -626,7 +667,8 @@ BEGIN
             [has_included_lob]        BIT           NOT NULL,
             [has_key_blocker]         BIT           NOT NULL,
             [resumable_supported]     BIT           NOT NULL,
-            [cmd]                     NVARCHAR(MAX) NOT NULL
+            [cmd]                     NVARCHAR(MAX) NOT NULL,
+            [candidate_reason]        VARCHAR(20)   NOT NULL,
         );
 
         DECLARE @mode VARCHAR(16) = CASE WHEN UPPER(@pSampleMode COLLATE DATABASE_DEFAULT) = N''DETAILED'' THEN N''DETAILED'' ELSE N''SAMPLED'' END;
@@ -649,6 +691,13 @@ BEGIN
             au_total_pages, 
             au_used_pages, 
             au_data_pages, 
+            user_seeks,
+            user_scans,
+            user_lookups,
+            user_updates,
+            last_user_seek,
+            last_user_scan,
+            last_user_lookup,
             compression_desc, 
             chosen_fill_factor,
             is_partitioned, 
@@ -656,7 +705,8 @@ BEGIN
             has_included_lob, 
             has_key_blocker, 
             resumable_supported, 
-            cmd
+            cmd,
+            candidate_reason
         )
         SELECT
             s.name, 
@@ -675,6 +725,13 @@ BEGIN
             COALESCE(SUM(au.total_pages),0), 
             COALESCE(SUM(au.used_pages),0), 
             COALESCE(SUM(au.data_pages),0),
+            COALESCE(us.user_seeks,   0),
+            COALESCE(us.user_scans,   0),
+            COALESCE(us.user_lookups, 0),
+            COALESCE(us.user_updates, 0),
+            us.last_user_seek,
+            us.last_user_scan,
+            us.last_user_lookup,
             p.data_compression_desc,
             CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END,
             CASE WHEN psch.data_space_id IS NULL THEN 0 ELSE 1 END,
@@ -704,7 +761,10 @@ BEGIN
                 CASE WHEN @pOnline = 1 AND @pResumable = 1 AND rs.resumable_supported = 1 AND @pMaxDurationMinutes IS NOT NULL
                         THEN N'', MAX_DURATION = '' + CONVERT(VARCHAR(4), @pMaxDurationMinutes) + N'' MINUTES'' ELSE N'''' END +
                 N'')''
-            )
+            ),
+            CASE WHEN ps.avg_page_space_used_in_percent < @pMinPageDensityPct THEN ''DENSITY''
+                ELSE ''READ_AHEAD''
+            END AS candidate_reason,
         FROM sys.indexes AS i
         JOIN sys.tables  AS t ON 
             t.object_id = i.object_id
@@ -717,6 +777,10 @@ BEGIN
             ds.data_space_id = i.data_space_id
         LEFT JOIN sys.partition_schemes AS psch ON 
             psch.data_space_id = ds.data_space_id
+        LEFT JOIN sys.dm_db_index_usage_stats AS us
+            us.database_id = DB_ID() ON
+            us.object_id = i.object_id AND
+            us.index_id = i.index_id AND
         JOIN sys.allocation_units AS au ON 
             au.container_id = p.hobt_id AND au.type IN (1,3)
         CROSS APPLY
@@ -760,15 +824,34 @@ BEGIN
             i.is_hypothetical = 0 AND 
             i.is_disabled = 0 AND 
             ps.index_level = 0 AND 
-            ps.page_count >= @pMinPageCount AND 
+            ps.page_count >= @pMinPageCount AND
             (
+                -- Path A: bloat by page density 
                 ps.avg_page_space_used_in_percent < @pMinPageDensityPct
-                OR (@pMinAvgFragSizePages IS NOT NULL AND ps.avg_fragment_size_in_pages < @pMinAvgFragSizePages)
+
+                OR
+
+                -- Path B: read-ahead disruption, tightly gated 
+                (
+                    @pMinAvgFragSizePages IS NOT NULL
+                    AND ps.page_count >= @pReadAheadMinPageCount
+                    AND ps.avg_fragment_size_in_pages < @pMinAvgFragSizePages
+                    AND ps.avg_fragmentation_in_percent >= @pReadAheadMinFragPct
+
+                    /* Require scan evidence (since last restart) OR recent scan timestamp */
+                    AND
+                    (
+                        (COALESCE(us.user_scans,0) + COALESCE(us.user_lookups,0)) >= @pReadAheadMinScanOps
+                        OR ( @pReadAheadLookbackDays > 0
+                             AND us.last_user_scan >= DATEADD(DAY, -@pReadAheadLookbackDays, GETDATE())
+                           )
+                    )
+                )
             ) AND 
             t.is_ms_shipped = 0 AND 
             t.is_memory_optimized = 0  AND 
                 (
-                    NOT EXISTS (SELECT 1 FROM #IndexIncludes)
+                NOT EXISTS (SELECT 1 FROM #IndexIncludes)
                  OR EXISTS
                     (
                         SELECT 1
@@ -826,6 +909,7 @@ BEGIN
                 c.page_density_pct, 
                 c.fragmentation_pct,
                 c.avg_fragment_size_pages,
+                c.candidate_reason,
                 c.avg_row_bytes, 
                 c.record_count, 
                 c.ghost_record_count, 
@@ -844,7 +928,7 @@ BEGIN
         INSERT INTO ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog]
         (
             database_name, schema_name, table_name, index_name, index_id, partition_number,
-            page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages,
+            page_count, page_density_pct, fragmentation_pct, avg_fragment_size_pages, candidate_reason,
             avg_row_bytes, record_count, ghost_record_count, forwarded_record_count,
             au_total_pages, au_used_pages, au_data_pages,
             chosen_fill_factor, online_on, maxdop_used, [action], cmd, [status]
@@ -861,6 +945,7 @@ BEGIN
             page_density_pct,
             fragmentation_pct,
             avg_fragment_size_pages,
+            candidate_reason COLLATE <<LOGCOLLATION>>,
             avg_row_bytes,
             record_count,
             ghost_record_count,
@@ -895,13 +980,15 @@ BEGIN
             [page_count]          BIGINT        NOT NULL,
             [is_partitioned]      BIT           NOT NULL,
             [compression_desc]    NVARCHAR(60)  NOT NULL,
-            [chosen_fill_factor]  INT           NULL
+            [chosen_fill_factor]  INT           NULL,
+            [candidate_reason]     VARCHAR(20)  NOT NULL
+
         );
 
         INSERT #exec
         (
-            log_id, cmd, schema_name, table_name, index_name, index_id,
-            partition_number, page_count, is_partitioned, compression_desc, chosen_fill_factor
+            log_id, cmd, schema_name, table_name, index_name, index_id, partition_number,
+            page_count, is_partitioned, compression_desc, chosen_fill_factor, candidate_reason
         )
         SELECT
             t.log_id,
@@ -914,7 +1001,8 @@ BEGIN
             l.page_count,
             c.is_partitioned,
             c.compression_desc,
-            c.chosen_fill_factor
+            c.chosen_fill_factor,
+            l.candidate_reason COLLATE <<LOGCOLLATION>>
         FROM #todo AS t
         JOIN ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
             ON l.log_id = t.log_id
@@ -968,7 +1056,7 @@ BEGIN
             FROM #exec
             WHERE rn = @i;
 
-            SET @msg = N''Rebuilding '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+            SET @msg = N''Rebuilding ('' + @reason + N'') '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
                      + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
@@ -1115,6 +1203,10 @@ BEGIN
               @pMinAvgFragSizePages INT,
               @pUseExistingFillFactor BIT,
               @pFillFactor TINYINT,
+              @pReadAheadMinPageCount INT,
+              @pReadAheadMinFragPct DECIMAL(5,2),
+              @pReadAheadMinScanOps BIGINT,
+              @pReadAheadLookbackDays INT,
               @pOnline BIT,
               @pMaxDOP INT,
               @pSortInTempdb BIT,
@@ -1134,6 +1226,10 @@ BEGIN
               @pMinAvgFragSizePages          = @MinAvgFragmentSizePages,
               @pUseExistingFillFactor        = @UseExistingFillFactor,
               @pFillFactor                   = @FillFactor,
+              @pReadAheadMinPageCount        = @ReadAheadMinPageCount,
+              @pReadAheadMinFragPct          = @ReadAheadMinFragPct,
+              @pReadAheadMinScanOps          = @ReadAheadMinScanOps,
+              @pReadAheadLookbackDays        = @ReadAheadLookbackDays,
               @pOnline                       = @Online,
               @pMaxDOP                       = @MaxDOP,
               @pSortInTempdb                 = @SortInTempdb,
