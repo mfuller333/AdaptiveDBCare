@@ -6,7 +6,7 @@ This release of AdaptiveDBCare introduces coordinated, cross-database index rebu
 
 ---
 
-# DBA.usp_RebuildIndexesIfBloated (v**3.0**, 2026-02-05)
+# DBA.usp_RebuildIndexesIfBloated (v**3.1**, 2026-02-07)
 
 ---
 
@@ -17,41 +17,63 @@ This procedure finds leaf-level **rowstore** index partitions that meet one (or 
 * **Low page density** (`avg_page_space_used_in_percent < @MinPageDensityPct`)
 * **Poor extent continuity** (`avg_fragment_size_in_pages < @MinAvgFragmentSizePages`) which is the metric that actually correlates to read-ahead effectiveness on SSD
 
+**Important clarification (v3.1):** the **READ_AHEAD** path is a **multi-factor gated rule-set**, not a single threshold.  
+A partition is treated as a read-ahead candidate only when all of the following gates are satisfied:
+
+* `page_count >= @ReadAheadMinPageCount` (default **50000**)
+* `avg_fragment_size_in_pages < @MinAvgFragmentSizePages` (default **8**)
+* `avg_fragmentation_in_percent >= @ReadAheadMinFragPct` (default **30**)
+* Fill factor gate: `source_fill_factor >= @ReadAheadMinFillFactor` (default **90**)
+* Scan evidence (at least one must be true):
+  * `(user_scans + user_lookups) >= @ReadAheadMinScanOps` (default **1000**)  
+    **OR**
+  * `last_user_scan` within `@ReadAheadLookbackDays` (default **7**)
+
 It then rebuilds just those partitions, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
 
 > **Works on SQL Server 2014–2025.** ONLINE/RESUMABLE features auto-downgrade based on edition and version (Enterprise/Developer/Evaluation for ONLINE; SQL 2019+ for RESUMABLE). Defaults to safe **WhatIf** mode.
 
 ---
 
-## What’s new in 3.0
+## What’s new in 3.1
 
-* **New rebuild trigger: `@MinAvgFragmentSizePages` (SSD read-ahead signal)**
-  Logical fragmentation percent is often cosmetic on SSD. Read-ahead cares about extent continuity, best represented by `avg_fragment_size_in_pages`.
+* **Read-ahead path is now tightly gated (fewer false positives)**
+  The read-ahead signal (`avg_fragment_size_in_pages`) is now *only* allowed to trigger rebuilds when the partition is large enough and there is real scan evidence.
 
-  v3.0 introduces:
+  New read-ahead guardrail parameters:
 
-  * `@MinAvgFragmentSizePages` (default **8**)
+  * `@ReadAheadMinPageCount` (default **50000**)
+  * `@ReadAheadMinFragPct` (default **30.0**)
+  * `@ReadAheadMinScanOps` (default **1000**)
+  * `@ReadAheadLookbackDays` (default **7**)
+  * `@ReadAheadMinFillFactor` (default **90**)
 
-  A partition becomes a rebuild candidate if **either**:
+* **Low fill factor avoidance (stop rebuilding “sparse by design”)**
+  Density-based rebuilds now avoid rebuilding indexes with low fill factor (intentional free space) unless density is **extremely** poor.
 
-  * `avg_page_space_used_in_percent < @MinPageDensityPct`
-    **OR**
-  * `avg_fragment_size_in_pages < @MinAvgFragmentSizePages`
+  New low-FF parameters:
 
-  Set `@MinAvgFragmentSizePages = NULL` to disable this trigger.
+  * `@SkipLowFillFactor` (default **1**)
+  * `@LowFillFactorThreshold` (default **80**)
+  * `@LowFillFactorDensitySlackPct` (default **15.0**)
 
-  Internal name in the dynamic SQL execution context:
+* **New logged decision signals**
+  The log table now records *why* a partition was selected, and the fill factor context that influenced the decision:
 
-  * `@pMinAvgFragSizePages`
+  * `candidate_reason` = `DENSITY` | `READ_AHEAD`
+  * `source_fill_factor`
+  * `fill_factor_guard_applied`
 
-* **Richer logging**
-  The log table now captures the new metric:
+* **Clearer default logging behavior**
+  If you **do not** specify `@LogDatabase`, the procedure will create/maintain a log table **in each target database**.
 
-  * `avg_fragment_size_pages` (sourced from `avg_fragment_size_in_pages`)
+  * Default (`@LogDatabase = NULL`): each target DB gets its own `[DBA].[IndexBloatRebuildLog]`
+  * Central logging (`@LogDatabase = N'UtilityDb'`): one log table in the specified DB, recording rows for all targets
 
-  This provides clear evidence when a rebuild was driven by scattered extents versus low page density.
+* **Collation-safe central logging**
+  Per-target and per-log database collations are captured and applied so cross-database inserts/joins do not fail on collation conflicts.
 
-No breaking changes. No behavioral regressions. Existing automation continues to work as-is.
+No breaking changes intended. Existing automation continues to work as-is, but with stricter rebuild gating (by design).
 
 ---
 
@@ -74,7 +96,18 @@ No breaking changes. No behavioral regressions. Existing automation continues to
 * Candidate detection supports **two independent signals**:
 
   * low density (`avg_page_space_used_in_percent`)
-  * low avg fragment size (`avg_fragment_size_in_pages`) for SSD read-ahead
+  * low avg fragment size (`avg_fragment_size_in_pages`) for SSD read-ahead (**now tightly gated**)
+
+* **Read-ahead path guardrails** (v3.1):
+
+  * minimum size: `@ReadAheadMinPageCount`
+  * minimum fragmentation: `@ReadAheadMinFragPct`
+  * fill factor gate: `@ReadAheadMinFillFactor`
+  * scan evidence: `@ReadAheadMinScanOps` **or** recent `last_user_scan` within `@ReadAheadLookbackDays`
+
+* **Low fill factor guardrails** (v3.1):
+
+  * avoid rebuilding low-FF indexes unless density is far worse than the normal threshold
 
 * **ONLINE = ON** when supported, with optional `WAIT_AT_LOW_PRIORITY (MAX_DURATION, ABORT_AFTER_WAIT)`.
 
@@ -108,16 +141,54 @@ No breaking changes. No behavioral regressions. Existing automation continues to
 
 * **Central or per-DB logging** to `[DBA].[IndexBloatRebuildLog]`.
 
-* Captures trending signals:
+* Defaults to **WhatIf** (dry run).
 
-  * `avg_fragment_size_pages` (new in v3.0)
+---
+
+## Signals and telemetry captured
+
+### Logged signals in `[DBA].[IndexBloatRebuildLog]`
+
+These are persisted for auditing/trending:
+
+* Partition identity + size:
+
+  * `database_name`, `schema_name`, `table_name`, `index_name`, `index_id`, `partition_number`
+  * `page_count`
+
+* Bloat / fragmentation signals:
+
+  * `page_density_pct` (from `avg_page_space_used_in_percent`)
+  * `fragmentation_pct` (from `avg_fragmentation_in_percent`)
+  * `avg_fragment_size_pages` (from `avg_fragment_size_in_pages`)
+
+* Decision signals (newer / emphasized in v3.1):
+
+  * `candidate_reason` (`DENSITY` | `READ_AHEAD`)
+  * `source_fill_factor`
+  * `fill_factor_guard_applied`
+  * `chosen_fill_factor`
+
+* Row + allocation signals:
+
   * `avg_row_bytes`
   * `record_count`
   * `ghost_record_count`
   * `forwarded_record_count`
-  * allocation unit pages (`au_total_pages`, `au_used_pages`, `au_data_pages`)
+  * `au_total_pages`, `au_used_pages`, `au_data_pages`
 
-* Defaults to **WhatIf** (dry run).
+* Execution options and outcomes:
+
+  * `online_on`, `maxdop_used`
+  * `action`, `status`, full `cmd`
+  * error metadata (`error_message`, `error_number`, `error_severity`, `error_state`, `error_line`, `error_proc`)
+
+### Usage signals used for gating (captured during evaluation)
+
+These are collected from `sys.dm_db_index_usage_stats` to qualify read-ahead candidates (scan evidence). They influence selection but are **not persisted** to the log table in v3.1:
+
+* `user_seeks`, `user_scans`, `user_lookups`, `user_updates`
+* `last_user_seek`, `last_user_scan`, `last_user_lookup`
 
 ---
 
@@ -136,12 +207,12 @@ The procedure self-detects engine capabilities and quietly disables unsafe optio
 
 1. Ensure the `DBA` schema exists (created automatically if missing).
 2. Deploy the procedure once, typically into a Utility or DBA database.
-3. First execution ensures `[DBA].[IndexBloatRebuildLog]` exists in either:
+3. First execution ensures `[DBA].[IndexBloatRebuildLog]` exists:
 
-   * the target database, or
-   * a central log database specified via `@LogDatabase`.
+   * **Default behavior (important):** if `@LogDatabase` is **NULL** (default), the procedure creates/uses the log table **inside each target database**.
+   * If `@LogDatabase` is specified, the procedure creates/uses the log table in that **single central database**.
 
-If the log table already exists, v3.0 upgrades it as needed (including adding `avg_fragment_size_pages`) and enforces compatible column widths to prevent retry and error-path failures.
+If the log table already exists, the procedure upgrades it as needed and enforces compatible column widths to prevent retry and error-path failures.
 
 > Deploy once. Run anywhere. Log centrally or locally.
 
@@ -149,30 +220,38 @@ If the log table already exists, v3.0 upgrades it as needed (including adding `a
 
 ## Parameters
 
-| Parameter                   | Type          | Default       | Notes                                                                                                                                                                 |
-| --------------------------- | ------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@Help`                     | BIT           | 0             | `1` prints help, capabilities, and examples; returns without scanning.                                                                                                |
-| `@TargetDatabases`          | NVARCHAR(MAX) | **required**  | CSV list or `ALL_USER_DBS` with exclusions using `-DbName`. System DBs and `distribution` are always excluded.                                                        |
-| `@Indexes`                  | NVARCHAR(MAX) | `ALL_INDEXES` | **Single DB only.** CSV allow/deny list using `schema.index` or `schema.table.index`; exclusions with `-`. Forced to `ALL_INDEXES` when more than one DB is targeted. |
-| `@MinPageDensityPct`        | DECIMAL(5,2)  | 70.0          | Rebuild when leaf partition density is below this percent.                                                                                                            |
-| `@MinPageCount`             | INT           | 1000          | Skip partitions smaller than this page count.                                                                                                                         |
-| `@MinAvgFragmentSizePages`  | INT           | 8             | Rebuild when `avg_fragment_size_in_pages` drops below this value (SSD read-ahead indicator). Set NULL to disable. Internally passed as `@pMinAvgFragSizePages`.       |
-| `@UseExistingFillFactor`    | BIT           | 1             | Preserve each index’s fill factor.                                                                                                                                    |
-| `@FillFactor`               | TINYINT       | NULL          | Used only when `@UseExistingFillFactor = 0`. Valid range 1–100.                                                                                                       |
-| `@Online`                   | BIT           | 1             | ONLINE when supported; OFFLINE fallback when not.                                                                                                                     |
-| `@MaxDOP`                   | INT           | NULL          | NULL uses server default; `0` or explicit values allowed.                                                                                                             |
-| `@SortInTempdb`             | BIT           | 1             | Automatically forced OFF when RESUMABLE is enabled.                                                                                                                   |
-| `@UseCompressionFromSource` | BIT           | 1             | Preserve partition compression when supported.                                                                                                                        |
-| `@ForceCompression`         | NVARCHAR(20)  | NULL          | `NONE`, `ROW`, or `PAGE` when not preserving.                                                                                                                         |
-| `@SampleMode`               | VARCHAR(16)   | `SAMPLED`     | `SAMPLED` or `DETAILED`.                                                                                                                                              |
-| `@CaptureTrendingSignals`   | BIT           | 0             | If `1` and `SAMPLED`, auto-upshifts to `DETAILED`.                                                                                                                    |
-| `@LogDatabase`              | SYSNAME       | NULL          | Central log DB; defaults to target DB when NULL.                                                                                                                      |
-| `@WaitAtLowPriorityMinutes` | INT           | NULL          | Enables `WAIT_AT_LOW_PRIORITY (MAX_DURATION)`.                                                                                                                        |
-| `@AbortAfterWait`           | NVARCHAR(20)  | NULL          | `NONE`, `SELF`, or `BLOCKERS`.                                                                                                                                        |
-| `@Resumable`                | BIT           | 0             | SQL Server 2019+; requires ONLINE.                                                                                                                                    |
-| `@MaxDurationMinutes`       | INT           | NULL          | RESUMABLE `MAX_DURATION`.                                                                                                                                             |
-| `@DelayMsBetweenCommands`   | INT           | NULL          | Optional delay between rebuilds in milliseconds.                                                                                                                      |
-| `@WhatIf`                   | BIT           | 1             | Dry run by default.                                                                                                                                                   |
+| Parameter                       | Type          | Default       | Notes                                                                                                                                                                 |
+| ------------------------------- | ------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@Help`                         | BIT           | 0             | `1` prints help, capabilities, and examples; returns without scanning.                                                                                                |
+| `@TargetDatabases`              | NVARCHAR(MAX) | **required**  | CSV list or `ALL_USER_DBS` with exclusions using `-DbName`. System DBs and `distribution` are always excluded.                                                        |
+| `@Indexes`                      | NVARCHAR(MAX) | `ALL_INDEXES` | **Single DB only.** CSV allow/deny list using `schema.index` or `schema.table.index`; exclusions with `-`. Forced to `ALL_INDEXES` when more than one DB is targeted. |
+| `@MinPageDensityPct`            | DECIMAL(5,2)  | 70.0          | Rebuild when leaf partition density is below this percent.                                                                                                            |
+| `@MinPageCount`                 | INT           | 1000          | Skip partitions smaller than this page count.                                                                                                                         |
+| `@MinAvgFragmentSizePages`      | INT           | 8             | Rebuild when `avg_fragment_size_in_pages` drops below this value (SSD read-ahead indicator). Set NULL to disable. Internally passed as `@pMinAvgFragSizePages`.       |
+| `@ReadAheadMinPageCount`        | INT           | 50000         | Read-ahead path: minimum `page_count` to consider the read-ahead signal.                                                                                              |
+| `@ReadAheadMinFragPct`          | DECIMAL(5,2)  | 30.0          | Read-ahead path: minimum fragmentation percent to reduce noise.                                                                                                       |
+| `@ReadAheadMinScanOps`          | BIGINT        | 1000          | Read-ahead path: minimum scans+lookups since restart.                                                                                                                 |
+| `@ReadAheadLookbackDays`        | INT           | 7             | Read-ahead path: accept if `last_user_scan` is within this many days.                                                                                                 |
+| `@ReadAheadMinFillFactor`       | TINYINT       | 90            | Read-ahead path: require fill factor >= this to reduce churn on sparse indexes.                                                                                       |
+| `@SkipLowFillFactor`            | BIT           | 1             | If 1, avoids rebuilding low fill factor indexes unless density is **much worse**.                                                                                     |
+| `@LowFillFactorThreshold`       | TINYINT       | 80            | Fill factor <= this is treated as intentionally sparse.                                                                                                               |
+| `@LowFillFactorDensitySlackPct` | DECIMAL(5,2)  | 15.0          | For low-FF indexes, require density < (`@MinPageDensityPct - slack`) to rebuild via density path.                                                                     |
+| `@UseExistingFillFactor`        | BIT           | 1             | Preserve each index’s fill factor.                                                                                                                                    |
+| `@FillFactor`                   | TINYINT       | NULL          | Used only when `@UseExistingFillFactor = 0`. Valid range 1–100.                                                                                                       |
+| `@Online`                       | BIT           | 1             | ONLINE when supported; OFFLINE fallback when not.                                                                                                                     |
+| `@MaxDOP`                       | INT           | NULL          | NULL uses server default; `0` or explicit values allowed.                                                                                                             |
+| `@SortInTempdb`                 | BIT           | 1             | Automatically forced OFF when RESUMABLE is enabled.                                                                                                                   |
+| `@UseCompressionFromSource`     | BIT           | 1             | Preserve partition compression when supported.                                                                                                                        |
+| `@ForceCompression`             | NVARCHAR(20)  | NULL          | `NONE`, `ROW`, or `PAGE` when not preserving.                                                                                                                         |
+| `@SampleMode`                   | VARCHAR(16)   | `SAMPLED`     | `SAMPLED` or `DETAILED`.                                                                                                                                              |
+| `@CaptureTrendingSignals`       | BIT           | 0             | If `1` and `SAMPLED`, auto-upshifts to `DETAILED`.                                                                                                                    |
+| `@LogDatabase`                  | SYSNAME       | NULL          | **If NULL (default), log table is created/used in each target DB.** If set, logs centrally in the specified DB.                                                       |
+| `@WaitAtLowPriorityMinutes`     | INT           | NULL          | Enables `WAIT_AT_LOW_PRIORITY (MAX_DURATION)`.                                                                                                                        |
+| `@AbortAfterWait`               | NVARCHAR(20)  | NULL          | `NONE`, `SELF`, or `BLOCKERS`.                                                                                                                                        |
+| `@Resumable`                    | BIT           | 0             | SQL Server 2019+; requires ONLINE.                                                                                                                                    |
+| `@MaxDurationMinutes`           | INT           | NULL          | RESUMABLE `MAX_DURATION`.                                                                                                                                             |
+| `@DelayMsBetweenCommands`       | INT           | NULL          | Optional delay between rebuilds in milliseconds.                                                                                                                      |
+| `@WhatIf`                       | BIT           | 1             | Dry run by default.                                                                                                                                                   |
 
 ---
 
@@ -184,6 +263,8 @@ If the log table already exists, v3.0 upgrades it as needed (including adding `a
 * Compression options are auto-disabled when unsupported.
 * When compression is unsupported, only uncompressed partitions are considered.
 * `@MinAvgFragmentSizePages` can be set to NULL to disable the SSD read-ahead trigger.
+* Read-ahead candidates must pass minimum size + fragmentation + scan evidence + fill factor gates (v3.1).
+* Low fill factor guardrails reduce rebuild churn on intentionally sparse indexes (v3.1).
 
 ---
 
@@ -195,7 +276,7 @@ If the log table already exists, v3.0 upgrades it as needed (including adding `a
 EXEC DBA.usp_RebuildIndexesIfBloated @Help = 1;
 ```
 
-### Dry run across all user databases
+### Dry run across all user databases (logs in each DB by default)
 
 ```sql
 EXEC DBA.usp_RebuildIndexesIfBloated
@@ -270,23 +351,22 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 * **Messages**:
 
   * per-DB STARTING and COMPLETED
-  * per-index rebuild progress
+  * per-index rebuild progress (includes candidate reason)
 
 * **Log table**: `[DBA].[IndexBloatRebuildLog]`
 
+  * **Default behavior:** if `@LogDatabase` is NULL, the log table is created/used in **each target database**
+  * Central logging: specify `@LogDatabase` to log all targets into one DB
+
+  Captures:
+
   * Identity: database, schema, table, index, partition
-  * Metrics: density, fragmentation, avg fragment size, row and ghost counts, AU pages
-  * Options used: fill factor, ONLINE, MAXDOP
-  * Action and status:
+  * Metrics: density, fragmentation, avg fragment size, row/ghost/forwarded counts, AU pages
+  * Decision: `candidate_reason`, `source_fill_factor`, `fill_factor_guard_applied`
+  * Options used: chosen fill factor, ONLINE, MAXDOP, command text
+  * Status/action: DRYRUN / execution statuses, plus error metadata
 
-    * `DRYRUN`
-    * `SUCCESS`
-    * `FAILED`
-    * `SUCCESS_OFFLINE_FALLBACK`
-    * `FAILED_OFFLINE_FALLBACK`
-  * Full command text and error metadata
-
-* **Schema hardening**: legacy deployments are auto-corrected for text column widths, and v3.0 upgrades the log schema to include `avg_fragment_size_pages` when missing.
+* **Schema hardening**: legacy deployments are auto-corrected for text column widths, and log schema is upgraded when missing columns.
 
 ---
 
@@ -309,8 +389,8 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 ## Versioning
 
-* **Version**: 3.0
-* **Last updated**: 2026-02-05
+* **Version**: 3.1
+* **Last updated**: 2026-02-07
 
 ---
 
@@ -319,12 +399,6 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 Created by **Mike Fuller**.
 
 MIT licensed. Rebuild responsibly.
-
----
-
-## Credit
-
-Created by **Mike Fuller**.
 
 ---
 
@@ -452,5 +526,4 @@ MIT. Go forth and sample responsibly.
 
 Created by **Mike Fuller**.
 
-```
-```
+---
