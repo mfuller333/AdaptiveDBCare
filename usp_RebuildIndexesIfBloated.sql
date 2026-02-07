@@ -1120,7 +1120,7 @@ BEGIN
 
             RAISERROR(
                 N''WHATIF: Found %d candidate index partition(s) in database: [%s].'',
-                10, 1, @logged_count, , @pDbName
+                10, 1, @logged_count, @pDbName
             ) WITH NOWAIT;
         END
 
