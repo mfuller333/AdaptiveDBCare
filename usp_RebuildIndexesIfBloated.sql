@@ -1018,7 +1018,6 @@ BEGIN
             ) WITH NOWAIT;
         END
 
-
         IF OBJECT_ID(''tempdb..#todo'') IS NOT NULL DROP TABLE #todo;
         CREATE TABLE #todo (log_id BIGINT PRIMARY KEY, cmd NVARCHAR(MAX) NOT NULL);
 
