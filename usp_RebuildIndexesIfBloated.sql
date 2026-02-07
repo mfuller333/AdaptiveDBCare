@@ -999,6 +999,19 @@ BEGIN
             ff.fill_factor_guard_applied
         OPTION (RECOMPILE);
 
+        -- Candidate summary 
+        DECLARE @candidate_count INT = (SELECT COUNT(*) FROM #candidates);
+
+        IF @candidate_count = 0
+        BEGIN
+            IF @pWhatIf = 1
+                RAISERROR(N''WHATIF: None found (0 candidates) in database: [%s].'', 10, 1, DB_NAME()) WITH NOWAIT;
+            ELSE
+                RAISERROR(N''None found (0 candidates) in database: [%s].'', 10, 1, DB_NAME()) WITH NOWAIT;
+
+            RETURN;
+        END
+
         IF OBJECT_ID(''tempdb..#todo'') IS NOT NULL DROP TABLE #todo;
         CREATE TABLE #todo (log_id BIGINT PRIMARY KEY, cmd NVARCHAR(MAX) NOT NULL);
 
@@ -1092,8 +1105,15 @@ BEGIN
             [status] COLLATE <<LOGCOLLATION>>
         FROM to_log;
 
-        IF @pWhatIf = 1 OR NOT EXISTS (SELECT 1 FROM #todo)
-            RETURN;
+        IF @pWhatIf = 1
+        BEGIN
+            DECLARE @logged_count INT = (SELECT COUNT(*) FROM #todo);
+
+            RAISERROR(
+                N''WHATIF: Found %d candidate index partition(s) in database: [%s].'',
+                10, 1, @logged_count, DB_NAME()
+            ) WITH NOWAIT;
+        END
 
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
