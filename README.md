@@ -1,4 +1,3 @@
----
 
 # AdaptiveDBCare — Multi-Database Index & Statistics Optimization Release
 
