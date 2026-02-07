@@ -1228,11 +1228,43 @@ BEGIN
                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
+            IF @pWhatIf = 0
+            BEGIN
+                BEGIN TRY
+                    UPDATE l
+                    SET [status] = ''RUNNING''
+                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                    WHERE l.log_id = @log_id;
+
+                    EXEC (@cmd);
+
+                    UPDATE l
+                    SET [status] = ''SUCCESS''
+                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                    WHERE l.log_id = @log_id;
+                END TRY
+                BEGIN CATCH
+                    UPDATE l
+                    SET [status]        = ''FAILED'',
+                        error_message   = LEFT(ERROR_MESSAGE(), 4000),
+                        error_number    = ERROR_NUMBER(),
+                        error_severity  = ERROR_SEVERITY(),
+                        error_state     = ERROR_STATE(),
+                        error_line      = ERROR_LINE(),
+                        error_proc      = ERROR_PROCEDURE()
+                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                    WHERE l.log_id = @log_id;
+
+                    DECLARE @em NVARCHAR(4000) = LEFT(ERROR_MESSAGE(), 4000);
+                    RAISERROR(N''FAILED log_id=%I64d: %s'', 10, 1, @log_id, @em) WITH NOWAIT;
+                END CATCH
+            END
+
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
         END
         ';
-
+        
 		--change collations
 		SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
 		SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
