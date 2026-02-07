@@ -1,36 +1,110 @@
-
 # AdaptiveDBCare — Multi-Database Index & Statistics Optimization Release
 
-This release of AdaptiveDBCare introduces coordinated, cross-database index rebuild and statistics update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-database routines into a unified, intelligent maintenance engine for large SQL Server estates.
+This release of **AdaptiveDBCare** introduces coordinated, cross-database index rebuild and statistics update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-database routines into a unified, intelligent maintenance engine for large SQL Server estates.
 
 ---
 
-# DBA.usp_RebuildIndexesIfBloated (v**3.1**, 2026-02-07)
+# DBA.usp_RebuildIndexesIfBloated
+
+**Version:** **3.1.1**
+**Last updated:** **2026-02-07**
 
 ---
 
-Rebuild **only** what’s bloated, and only what is truly harmful to SSD read-ahead.
+## What this procedure does
 
-This procedure finds leaf-level **rowstore** index partitions that meet one (or both) of these conditions:
+Rebuild **only** what’s bloated — and only what is truly harmful to SSD read-ahead.
 
-* **Low page density** (`avg_page_space_used_in_percent < @MinPageDensityPct`)
-* **Poor extent continuity** (`avg_fragment_size_in_pages < @MinAvgFragmentSizePages`) which is the metric that actually correlates to read-ahead effectiveness on SSD
+This procedure scans **leaf-level rowstore** index **partitions** and flags a partition as a rebuild candidate when **one (or both)** of these conditions are true:
 
-**Important clarification (v3.1):** the **READ_AHEAD** path is a **multi-factor gated rule-set**, not a single threshold.  
-A partition is treated as a read-ahead candidate only when all of the following gates are satisfied:
+* **Low page density**
+  `avg_page_space_used_in_percent < @MinPageDensityPct`
+* **Poor extent continuity**
+  `avg_fragment_size_in_pages < @MinAvgFragmentSizePages`
+  This is the metric that correlates to **read-ahead effectiveness** on SSD/NVMe.
 
-* `page_count >= @ReadAheadMinPageCount` (default **50000**)
-* `avg_fragment_size_in_pages < @MinAvgFragmentSizePages` (default **8**)
-* `avg_fragmentation_in_percent >= @ReadAheadMinFragPct` (default **30**)
-* Fill factor gate: `source_fill_factor >= @ReadAheadMinFillFactor` (default **90**)
-* Scan evidence (at least one must be true):
-  * `(user_scans + user_lookups) >= @ReadAheadMinScanOps` (default **1000**)  
-    **OR**
-  * `last_user_scan` within `@ReadAheadLookbackDays` (default **7**)
-
-It then rebuilds just those partitions, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
+It then rebuilds **just those partitions**, optionally **ONLINE**, optionally **RESUMABLE**, respecting (or overriding) **FILLFACTOR** and **DATA_COMPRESSION**, and logs every decision.
 
 > **Works on SQL Server 2014–2025.** ONLINE/RESUMABLE features auto-downgrade based on edition and version (Enterprise/Developer/Evaluation for ONLINE; SQL 2019+ for RESUMABLE). Defaults to safe **WhatIf** mode.
+
+---
+
+## Understanding the signals
+
+### Page density
+
+`avg_page_space_used_in_percent` is the **actual fullness** of leaf pages. Low density means you’re hauling more pages through:
+
+* buffer pool
+* storage
+* read-ahead
+* scans
+
+Even on SSD, that translates to real cost: more logical reads, more memory pressure, more I/O work.
+
+### Read-ahead and extent continuity
+
+`avg_fragment_size_in_pages` is the “how long are the contiguous runs?” signal.
+
+On SSD, **sequential is still cheaper than random**, and SQL Server’s read-ahead performs best when it can pull **longer runs**. Very small fragment sizes mean scans turn into a pile of tiny read requests and the engine can’t read ahead efficiently.
+
+That said: read-ahead fragmentation only matters when an object is **large** and actually **scanned** — which is why the READ_AHEAD path is gated.
+
+---
+
+## READ_AHEAD path is a gated rule set
+
+**Important clarification (v3.1):** the **READ_AHEAD** path is a **multi-factor gated rule-set**, not a single threshold.
+
+A partition is treated as a read-ahead candidate only when **all** of the following gates are satisfied:
+
+* `page_count >= @ReadAheadMinPageCount` (default **50000**)
+  *Why:* small objects don’t benefit meaningfully from read-ahead tuning.
+* `avg_fragment_size_in_pages < @MinAvgFragmentSizePages` (default **8**)
+  *Why:* fragment runs shorter than an extent are the “read-ahead is falling apart” signal.
+* `avg_fragmentation_in_percent >= @ReadAheadMinFragPct` (default **30**)
+  *Why:* avoids noise / false positives on low-frag objects.
+* Fill factor gate: `source_fill_factor >= @ReadAheadMinFillFactor` (default **90**)
+  *Why:* prevents churn on indexes that are intentionally sparse.
+* Scan evidence (at least one must be true):
+
+  * `(user_scans + user_lookups) >= @ReadAheadMinScanOps` (default **1000**)
+    **OR**
+  * `last_user_scan` within `@ReadAheadLookbackDays` (default **7**)
+    *Why:* if nothing is scanning it, read-ahead quality is irrelevant.
+
+> Note: scan evidence uses `sys.dm_db_index_usage_stats`, which resets when SQL Server restarts. That’s a feature, not a bug: it keeps the gating tied to *recent* reality.
+
+---
+
+## Low fill factor avoidance
+
+Low fill factor is often intentional (write-heavy OLTP, split control, hot ranges).
+
+Density-based rebuilds avoid rebuilding low fill factor indexes (intentional free space) unless density is **extremely** poor.
+
+This prevents rebuilding “sparse by design” objects and immediately reintroducing the same free space the next time writes hit.
+
+---
+
+## What’s new in 3.1.1
+
+This is a **non-breaking patch release** focused on correctness and operator clarity.
+
+* **Zero-candidate paths are handled cleanly**
+
+  * When a database has no candidates, the procedure short-circuits safely with clear messages (especially helpful in Agent history).
+* **Message formatting hardened**
+
+  * Correct `RAISERROR … WITH NOWAIT` formatting to avoid edge-case failures during progress output.
+* **Read-ahead gating enforced consistently**
+
+  * Ensures the READ_AHEAD path cannot trigger unless **every** gate is satisfied (no “partial gate leakage”).
+* **Candidate reason is always populated**
+
+  * Logged `candidate_reason` is consistently `DENSITY` or `READ_AHEAD`.
+
+No breaking changes intended.
 
 ---
 
@@ -72,7 +146,7 @@ It then rebuilds just those partitions, optionally **ONLINE**, optionally **RESU
 * **Collation-safe central logging**
   Per-target and per-log database collations are captured and applied so cross-database inserts/joins do not fail on collation conflicts.
 
-No breaking changes intended. Existing automation continues to work as-is, but with stricter rebuild gating (by design).
+Existing automation continues to work as-is, but with stricter rebuild gating (by design).
 
 ---
 
@@ -388,7 +462,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 ## Versioning
 
-* **Version**: 3.1
+* **Version**: 3.1.1
 * **Last updated**: 2026-02-07
 
 ---
@@ -401,11 +475,35 @@ MIT licensed. Rebuild responsibly.
 
 ---
 
-# DBA.usp_UpdateStatisticsIfChanged (v**1.3**, 2025-11-16)
+# DBA.usp_UpdateStatisticsIfChanged
+
+**Version:** **1.3**
+**Last updated:** **2025-11-16**
 
 From a **single** utility DB, update statistics in one or many target databases **only when they’ve changed** — either by a **threshold %** or using `ALL_CHANGES`. Supports `FULLSCAN`, `DEFAULT`, or `SAMPLED <n>%`. All actions are centrally logged.
 
 > **Works on SQL Server 2014–2025.** Designed to be deployed once in a Utility/DBA DB and run against many user DBs. Defaults to **WhatIf**.
+
+---
+
+## What “changed” means
+
+This procedure uses `sys.dm_db_stats_properties` to determine whether a statistic has moved enough to justify an update.
+
+Two modes exist:
+
+* **ALL_CHANGES**
+
+  * Updates any statistic where `modification_counter > 0`
+  * Best when you want “touch anything that moved” behavior without guessing a threshold
+* **Threshold mode**
+
+  * Updates when `change% >= @ChangeThresholdPercent`
+  * Useful when you want fewer updates and clearer control
+
+Edge case handling:
+
+* stats where `rows = 0 AND modification_counter > 0` are still candidates (prevents “stale empty table stats” traps).
 
 ---
 
@@ -524,5 +622,3 @@ MIT. Go forth and sample responsibly.
 ## Credit
 
 Created by **Mike Fuller**.
-
----
