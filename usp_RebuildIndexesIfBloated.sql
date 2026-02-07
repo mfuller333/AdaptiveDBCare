@@ -1005,12 +1005,21 @@ BEGIN
         IF @candidate_count = 0
         BEGIN
             IF @pWhatIf = 1
-                RAISERROR(N''WHATIF: None found (0 candidates) in database: [%s].'', 10, 1, DB_NAME()) WITH NOWAIT;
+                RAISERROR(N''WHATIF: None found (0 candidates) in database: [%s].'', 10, 1, @pDbName) WITH NOWAIT;
             ELSE
-                RAISERROR(N''None found (0 candidates) in database: [%s].'', 10, 1, DB_NAME()) WITH NOWAIT;
+                RAISERROR(N''None found (0 candidates) in database: [%s].'', 10, 1, @pDbName) WITH NOWAIT;
 
             RETURN;
         END
+
+        IF @pWhatIf = 1
+        BEGIN
+            RAISERROR(
+                N''WHATIF: Found %d candidate index partition(s) in database: [%s].'',
+                10, 1, @candidate_count, @pDbName
+            ) WITH NOWAIT;
+        END
+
 
         IF OBJECT_ID(''tempdb..#todo'') IS NOT NULL DROP TABLE #todo;
         CREATE TABLE #todo (log_id BIGINT PRIMARY KEY, cmd NVARCHAR(MAX) NOT NULL);
@@ -1111,7 +1120,7 @@ BEGIN
 
             RAISERROR(
                 N''WHATIF: Found %d candidate index partition(s) in database: [%s].'',
-                10, 1, @logged_count, DB_NAME()
+                10, 1, @logged_count, , @pDbName
             ) WITH NOWAIT;
         END
 
@@ -1223,7 +1232,8 @@ BEGIN
 
         EXEC sys.sp_executesql
             @sql,
-            N'@pMinPageDensityPct DECIMAL(5,2),
+            N'@pDbName SYSNAME,
+              @pMinPageDensityPct DECIMAL(5,2),
               @pMinPageCount INT,
               @pMinAvgFragSizePages INT,
               @pUseExistingFillFactor BIT,
@@ -1250,6 +1260,7 @@ BEGIN
               @pDelayMsBetweenCommands INT,
               @pIncludeDataCompressionOption BIT,
               @pIncludeOnlineOption BIT',
+              @pDbName                       = @db,
               @pMinPageDensityPct            = @MinPageDensityPct,
               @pMinPageCount                 = @MinPageCount,
               @pMinAvgFragSizePages          = @MinAvgFragmentSizePages,
