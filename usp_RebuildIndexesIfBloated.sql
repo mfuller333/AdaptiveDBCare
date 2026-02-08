@@ -1146,19 +1146,22 @@ BEGIN
         IF OBJECT_ID(''tempdb..#exec'') IS NOT NULL DROP TABLE #exec;
         CREATE TABLE #exec
         (
-            [rn]                INT IDENTITY(1,1) PRIMARY KEY,
-            [log_id]            BIGINT        NOT NULL,
-            [cmd]               NVARCHAR(MAX) NOT NULL,
-            [schema_name]       SYSNAME       NOT NULL,
-            [table_name]        SYSNAME       NOT NULL,
-            [index_name]        SYSNAME       NOT NULL,
-            [index_id]          INT           NOT NULL,
-            [partition_number]  INT           NOT NULL,
-            [page_count]        BIGINT        NOT NULL,
-            [is_partitioned]    BIT           NOT NULL,
-            [compression_desc]  NVARCHAR(60)  NOT NULL,
-            [chosen_fill_factor] INT          NULL,
-            [candidate_reason]  VARCHAR(20)   NOT NULL
+            [rn]                      INT IDENTITY(1,1) PRIMARY KEY,
+            [log_id]                  BIGINT        NOT NULL,
+            [cmd]                     NVARCHAR(MAX) NOT NULL,
+            [schema_name]             SYSNAME       NOT NULL,
+            [table_name]              SYSNAME       NOT NULL,
+            [index_name]              SYSNAME       NOT NULL,
+            [index_id]                INT           NOT NULL,
+            [partition_number]        INT           NOT NULL,
+            [page_count]              BIGINT        NOT NULL,
+            [page_density_pct]        DECIMAL(6,2)  NOT NULL, 
+            [fragmentation_pct]       DECIMAL(6,2)  NOT NULL, 
+            [avg_fragment_size_pages] DECIMAL(18,2) NOT NULL,
+            [is_partitioned]          BIT           NOT NULL,
+            [compression_desc]        NVARCHAR(60)  NOT NULL,
+            [chosen_fill_factor]      INT           NULL,
+            [candidate_reason]         VARCHAR(20)  NOT NULL
         );
 
         INSERT #exec
@@ -1169,8 +1172,11 @@ BEGIN
             [table_name], 
             [index_name], 
             [index_id],
-            [partition_number], 
+            [partition_number],
             [page_count], 
+            [page_density_pct], 
+            [fragmentation_pct],      
+            [avg_fragment_size_pages],            
             [is_partitioned], 
             [compression_desc], 
             [chosen_fill_factor], 
@@ -1185,6 +1191,9 @@ BEGIN
             l.index_id,
             l.partition_number,
             l.page_count,
+            c.page_density_pct, 
+            c.fragmentation_pct,       
+            c.avg_fragment_size_pages,  
             c.is_partitioned,
             c.compression_desc,
             c.chosen_fill_factor,
@@ -1214,6 +1223,9 @@ BEGIN
             @idxId INT,
             @part INT,
             @pages BIGINT,
+            @density DECIMAL(6,2),
+            @frag DECIMAL(6,2),
+            @avgFragRun DECIMAL(18,2),   
             @isPart BIT,
             @comp NVARCHAR(60),
             @ff INT,
@@ -1239,6 +1251,9 @@ BEGIN
                 @idxId = index_id,
                 @part = partition_number,
                 @pages = page_count,
+                @density = page_density_pct,
+                @frag = fragmentation_pct,
+                @avgFragRun = avg_fragment_size_pages,
                 @isPart = is_partitioned,
                 @comp = compression_desc,
                 @ff = chosen_fill_factor,
@@ -1285,8 +1300,17 @@ BEGIN
             IF @pSortInTempdb = 1
                 SET @cmdOffline = REPLACE(@cmdOffline, N''SORT_IN_TEMPDB = OFF'', N''SORT_IN_TEMPDB = ON'');
 
-            SET @msg = N''Rebuilding ('' + @reason + N'') '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
-                    + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
+            SET @msg = N''Rebuilding ('' + @reason + N'') '' 
+                    + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                    + N'' (partition '' + CONVERT(NVARCHAR(12), @part)
+                    + N'', pages = '' + CONVERT(NVARCHAR(20), @pages)
+                    + N'', density = '' + CONVERT(NVARCHAR(10), @density) + N''%''
+                    + N'', frag = '' + CONVERT(NVARCHAR(10), @frag) + N''%''
+                    + CASE WHEN @reason = ''READ_AHEAD''
+                        THEN N'', avg_frag_run = '' + CONVERT(NVARCHAR(20), @avgFragRun) + N'' pages''
+                        ELSE N''''
+                    END
+                    + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
 
             IF @pWhatIf = 0
