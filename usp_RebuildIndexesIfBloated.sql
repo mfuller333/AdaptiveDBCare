@@ -48,7 +48,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                                                                                                     ******/
 /****** Created by:  Mike Fuller                                                                            ******/
 /****** Date Updated: 02/07/2026                                                                            ******/
-/****** Version:     3.1                                                                          ¯\_(ツ)_/¯******/
+/****** Version:     3.1.1                                                                        ¯\_(ツ)_/¯******/
 /*****************************************************************************************************************/
 
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
