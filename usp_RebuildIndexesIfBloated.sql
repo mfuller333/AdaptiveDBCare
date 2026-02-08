@@ -1224,6 +1224,45 @@ BEGIN
             FROM #exec
             WHERE rn = @i;
 
+            -- Build OFFLINE retry command (strip ONLINE + WAIT_AT_LOW_PRIORITY + RESUMABLE + MAX_DURATION) 
+            SET @cmdOffline = @cmd;
+
+            -- Remove ONLINE = ON (with or without WAIT_AT_LOW_PRIORITY)
+            DECLARE @onlinePos INT = CHARINDEX(N'', ONLINE = ON'', @cmdOffline);
+            IF @onlinePos > 0
+            BEGIN
+                DECLARE @onlineEnd INT = 0;
+
+                -- If ONLINE has a parenthesized WAIT_AT_LOW_PRIORITY clause, remove through the closing 
+                IF SUBSTRING(@cmdOffline, @onlinePos + LEN(N'', ONLINE = ON''), 2) = N'' (''
+                BEGIN
+                    SET @onlineEnd = CHARINDEX(N''))'', @cmdOffline, @onlinePos);
+                    IF @onlineEnd > 0
+                        SET @cmdOffline = STUFF(@cmdOffline, @onlinePos, (@onlineEnd + 2 - @onlinePos), N'''');
+                    ELSE
+                        SET @cmdOffline = STUFF(@cmdOffline, @onlinePos, LEN(N'', ONLINE = ON''), N''''); -- safety fallback
+                END
+                ELSE
+                BEGIN
+                    SET @cmdOffline = STUFF(@cmdOffline, @onlinePos, LEN(N'', ONLINE = ON''), N'''');
+                END
+            END
+
+            -- OFFLINE cannot include RESUMABLE / MAX_DURATION
+            SET @cmdOffline = REPLACE(@cmdOffline, N'', RESUMABLE = ON'', N'''');
+
+            DECLARE @mdPos INT = CHARINDEX(N'', MAX_DURATION = '', @cmdOffline);
+            IF @mdPos > 0
+            BEGIN
+                DECLARE @mdEnd INT = CHARINDEX(N'' MINUTES'', @cmdOffline, @mdPos);
+                IF @mdEnd > 0
+                    SET @cmdOffline = STUFF(@cmdOffline, @mdPos, (@mdEnd + LEN(N'' MINUTES'') - @mdPos), N'''');
+            END
+
+            -- If RESUMABLE forced SORT_IN_TEMPDB off, restore requested setting for OFFLINE retry
+            IF @pSortInTempdb = 1
+                SET @cmdOffline = REPLACE(@cmdOffline, N''SORT_IN_TEMPDB = OFF'', N''SORT_IN_TEMPDB = ON'');
+
             SET @msg = N''Rebuilding ('' + @reason + N'') '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'', pages = '' + CONVERT(NVARCHAR(20), @pages) + N'')'';
             ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
@@ -1242,29 +1281,120 @@ BEGIN
                     SET [status] = ''SUCCESS''
                     FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
                     WHERE l.log_id = @log_id;
+
+                    SET @msg = N''SUCCESS  '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                             + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
+                    ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
                 END TRY
                 BEGIN CATCH
-                    UPDATE l
-                    SET [status]        = ''FAILED'',
-                        error_message   = LEFT(ERROR_MESSAGE(), 4000),
-                        error_number    = ERROR_NUMBER(),
-                        error_severity  = ERROR_SEVERITY(),
-                        error_state     = ERROR_STATE(),
-                        error_line      = ERROR_LINE(),
-                        error_proc      = ERROR_PROCEDURE()
-                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
-                    WHERE l.log_id = @log_id;
+                    DECLARE @ErrNum INT = ERROR_NUMBER();
+                    DECLARE @ErrMsg NVARCHAR(4000) = ERROR_MESSAGE();
 
-                    DECLARE @em NVARCHAR(4000) = LEFT(ERROR_MESSAGE(), 4000);
-                    RAISERROR(N''FAILED log_id=%I64d: %s'', 10, 1, @log_id, @em) WITH NOWAIT;
+                    -- Retry OFFLINE only if we attempted ONLINE and the failure smells like ONLINE not allowed
+                    IF (@pOnline = 1 AND @pIncludeOnlineOption = 1)
+                       AND (
+                            @ErrNum IN (2725, 2726, 2727, 2728, 1943, 1944)
+                        OR (
+                                (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%ONLINE%'' COLLATE <<DBCOLLATION>>)
+                            AND (
+                                   (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not allowed%''       COLLATE <<DBCOLLATION>>)
+                                OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%not supported%''     COLLATE <<DBCOLLATION>>)
+                                OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%does not support%''  COLLATE <<DBCOLLATION>>)
+                                OR (@ErrMsg COLLATE <<DBCOLLATION>>) LIKE (N''%cannot%''            COLLATE <<DBCOLLATION>>)
+                               )
+                            )
+                        )
+                    BEGIN
+                        SET @msg = N''ONLINE not possible (Error '' + CONVERT(NVARCHAR(12), @ErrNum) + N''): ''
+                                + LEFT(@ErrMsg, 1500)
+                                + N'' | retrying OFFLINE for ''
+                                + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                                + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
+                        ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
+
+                        BEGIN TRY
+                            EXEC (@cmdOffline);
+
+                            UPDATE l
+                            SET [status]        = ''SUCCESS_OFFLINE_FALLBACK'',
+                                online_on       = 0,
+                                cmd             = @cmdOffline,
+                                error_message   = NULL,
+                                error_number    = NULL,
+                                error_severity  = NULL,
+                                error_state     = NULL,
+                                error_line      = NULL,
+                                error_proc      = NULL
+                            FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                            WHERE l.log_id = @log_id;
+
+                            SET @msg = N''SUCCESS  (OFFLINE fallback) '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N'')'';
+                            ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
+                        END TRY
+                        BEGIN CATCH
+                            DECLARE @ErrNum2 INT = ERROR_NUMBER();
+                            DECLARE @ErrMsg2 NVARCHAR(4000) = ERROR_MESSAGE();
+                            DECLARE @CombinedErr NVARCHAR(4000);
+
+                            SET @CombinedErr =
+                                LEFT(
+                                    (N''ONLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+                                  + (CONVERT(NVARCHAR(12), @ErrNum) COLLATE <<DBCOLLATION>>)
+                                  + (N''): '' COLLATE <<DBCOLLATION>>)
+                                  + (@ErrMsg COLLATE <<DBCOLLATION>>)
+                                  + (N'' | OFFLINE failed (Error '' COLLATE <<DBCOLLATION>>)
+                                  + (CONVERT(NVARCHAR(12), @ErrNum2) COLLATE <<DBCOLLATION>>)
+                                  + (N''): '' COLLATE <<DBCOLLATION>>)
+                                  + (@ErrMsg2 COLLATE <<DBCOLLATION>>)
+                                , 4000);
+
+                            UPDATE l
+                            SET [status]       = ''FAILED_OFFLINE_FALLBACK'',
+                                online_on      = 0,
+                                cmd            = @cmdOffline,
+                                error_message  = @CombinedErr,
+                                error_number   = @ErrNum2,
+                                error_severity = ERROR_SEVERITY(),
+                                error_state    = ERROR_STATE(),
+                                error_line     = ERROR_LINE(),
+                                error_proc     = ERROR_PROCEDURE()
+                            FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                            WHERE l.log_id = @log_id;
+
+                            SET @msg = N''FAILED (OFFLINE fallback) ''
+                                  + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                                  + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): ''
+                                  + LEFT(@CombinedErr, 1500);
+                            RAISERROR(@msg, 10, 1) WITH NOWAIT;
+                        END CATCH;
+                    END
+                    ELSE
+                    BEGIN
+                        UPDATE l
+                        SET [status]       = ''FAILED'',
+                            error_message  = LEFT(@ErrMsg, 4000),
+                            error_number   = @ErrNum,
+                            error_severity = ERROR_SEVERITY(),
+                            error_state    = ERROR_STATE(),
+                            error_line     = ERROR_LINE(),
+                            error_proc     = ERROR_PROCEDURE()
+                        FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                        WHERE l.log_id = @log_id;
+
+                        SET @msg = N''FAILED   '' + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
+                                 + N'' (partition '' + CONVERT(NVARCHAR(12), @part) + N''): '' + LEFT(@ErrMsg, 1500);
+                        ;RAISERROR(@msg, 10, 1) WITH NOWAIT;
+                    END
                 END CATCH
             END
+
 
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
         END
         ';
-        
+
 		--change collations
 		SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
 		SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
