@@ -811,7 +811,7 @@ BEGIN
                 CASE WHEN (CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END) IS NOT NULL
                     THEN N'', FILLFACTOR = '' + CONVERT(VARCHAR(4), (CASE WHEN @pUseExistingFillFactor = 1 THEN NULLIF(i.fill_factor,0) ELSE @pFillFactor END))
                     ELSE N'''' END +
-                CASE WHEN @pIncludeOnlineOption = 1 AND @pOnline = 1
+                CASE WHEN @pIncludeOnlineOption = 1 AND @pOnline = 1 AND onl.online_supported = 1
                     THEN N'', ONLINE = ON'' +
                             CASE WHEN @pWaitAtLowPriorityMinutes IS NOT NULL
                                 THEN N'' (WAIT_AT_LOW_PRIORITY (MAX_DURATION = '' + CONVERT(VARCHAR(4), @pWaitAtLowPriorityMinutes) +
@@ -901,6 +901,25 @@ BEGIN
                         THEN 1 ELSE 0
                     END
         ) AS ff
+        CROSS APPLY
+        (
+            SELECT online_supported =
+                CASE WHEN EXISTS
+                (
+                    SELECT 1
+                    FROM sys.index_columns ic
+                    JOIN sys.columns c
+                    ON c.object_id = ic.object_id
+                    AND c.column_id = ic.column_id
+                    WHERE ic.object_id = i.object_id
+                    AND ic.index_id  = i.index_id
+                    AND (
+                           c.system_type_id IN (34, 35, 99) -- image, text, ntext
+                        OR c.is_filestream = 1
+                    )
+                )
+                THEN 0 ELSE 1 END
+        ) AS onl
         CROSS APPLY sys.dm_db_index_physical_stats(DB_ID(), i.object_id, i.index_id, p.partition_number, @mode) AS ps
         WHERE
             i.index_id > 0 AND
@@ -909,6 +928,7 @@ BEGIN
             i.is_disabled = 0 AND
             ps.index_level = 0 AND
             ps.page_count >= @pMinPageCount AND
+            ps.alloc_unit_type_desc = ''IN_ROW_DATA'' AND
             t.is_ms_shipped = 0 AND
             t.is_memory_optimized = 0 AND
             (
@@ -965,6 +985,7 @@ BEGIN
                    (exc.table_name  IS NULL OR (exc.table_name  COLLATE <<DBCOLLATION>>) = (t.name COLLATE <<DBCOLLATION>>))
             )
             AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
+
         GROUP BY
             s.name, 
             t.name, 
