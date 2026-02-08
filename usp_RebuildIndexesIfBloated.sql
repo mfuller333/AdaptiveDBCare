@@ -658,7 +658,7 @@ BEGIN
             CONTINUE;
         END CATCH
 
-		
+        
         --Core per-DB logic with progress
         DECLARE @sql NVARCHAR(MAX) =
         N'USE ' + @qDb + N';
@@ -967,33 +967,33 @@ BEGIN
             AND (@pIncludeDataCompressionOption = 1 OR p.data_compression = 0)
         GROUP BY
             s.name, 
-			t.name, 
-			i.name, 
-			i.index_id,
+            t.name, 
+            i.name, 
+            i.index_id,
             ps.partition_number, 
-			ps.page_count,
+            ps.page_count,
             ps.avg_page_space_used_in_percent, 
-			ps.avg_fragmentation_in_percent,
+            ps.avg_fragmentation_in_percent,
             ps.avg_fragment_size_in_pages,
             ps.avg_record_size_in_bytes,
             ps.record_count, 
-			ps.ghost_record_count, 
-			ps.forwarded_record_count,
+            ps.ghost_record_count, 
+            ps.forwarded_record_count,
             p.data_compression_desc,
             i.fill_factor,
             psch.data_space_id,
             i.has_filter,
             blockers.has_included_lob, 
-			blockers.has_key_blocker,
+            blockers.has_key_blocker,
             rs.resumable_supported,
             us.user_seeks, 
-			us.user_scans, 
-			us.user_lookups, 
-			us.user_updates,
+            us.user_scans, 
+            us.user_lookups, 
+            us.user_updates,
             us.last_user_seek, 
-			us.last_user_scan, 
-			us.last_user_lookup,
-			ff.source_fill_factor,
+            us.last_user_scan, 
+            us.last_user_lookup,
+            ff.source_fill_factor,
             ff.fill_factor_guard_applied
         OPTION (RECOMPILE);
 
@@ -1389,15 +1389,14 @@ BEGIN
                 END CATCH
             END
 
-
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
         END
         ';
 
-		--change collations
-		SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
-		SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
+        --change collations
+        SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
+        SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
 
         EXEC sys.sp_executesql
             @sql,
