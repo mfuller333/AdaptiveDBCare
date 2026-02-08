@@ -1304,8 +1304,8 @@ BEGIN
                     + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part)
                     + N'', pages = '' + CONVERT(NVARCHAR(20), @pages)
-                    + N'', density = '' + CONVERT(NVARCHAR(10), @density) + N''%''
-                    + N'', frag = '' + CONVERT(NVARCHAR(10), @frag) + N''%''
+                    + N'', density = '' + CONVERT(NVARCHAR(10), @density) + N''%%''
+                    + N'', frag = '' + CONVERT(NVARCHAR(10), @frag) + N''%%''
                     + CASE WHEN @reason = ''READ_AHEAD''
                         THEN N'', avg_frag_run = '' + CONVERT(NVARCHAR(20), @avgFragRun) + N'' pages''
                         ELSE N''''
