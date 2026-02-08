@@ -1015,7 +1015,8 @@ BEGIN
             us.last_user_scan, 
             us.last_user_lookup,
             ff.source_fill_factor,
-            ff.fill_factor_guard_applied
+            ff.fill_factor_guard_applied,
+            onl.online_supported
         OPTION (RECOMPILE);
 
         -- Candidate summary 
