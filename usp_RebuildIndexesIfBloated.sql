@@ -47,7 +47,7 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                 source_fill_factor, fill_factor_guard_applied                                       ******/
 /******                                                                                                     ******/
 /****** Created by:   Mike Fuller                                                                           ******/
-/****** Date Updated: 02/07/2026                                                                            ******/
+/****** Date Updated: 2026-02-07                                                                            ******/
 /****** Version:      3.1.1                                                                       ¯\_(ツ)_/¯******/
 /*****************************************************************************************************************/
 

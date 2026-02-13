@@ -538,8 +538,8 @@ Edge case handling:
 | `@ChangeThresholdPercent` | DECIMAL(6,2)  |         NULL | Used when `@ChangeScope IS NULL`. Must be `0–100`.                                            |
 | `@ChangeScope`            | VARCHAR(20)   |         NULL | Exact-case token **ALL_CHANGES** to update any stats with changes; otherwise threshold mode.  |
 | `@SampleMode`             | VARCHAR(12)   |    `DEFAULT` | Exact-case tokens: **FULLSCAN**, **DEFAULT**, **SAMPLED**.                                    |
-| `@SamplePercent`          | DECIMAL(6,2)  |         NULL | Required when `@SampleMode='SAMPLED'`. Range `>0` to `<=100`; rounded to whole % on SQL 2014. |
-| `@LogDatabase`            | SYSNAME       |         NULL | Central log DB; defaults to **this** utility DB when NULL.                                    |
+| `@SamplePercent`          | DECIMAL(6,2)  |            1 | Required when `@SampleMode='SAMPLED'`. Range `>0` to `<=100`; rounded to whole % on SQL 2014. |
+| `@LogDatabase`            | SYSNAME       |         NULL | Central log DB; defaults to **this** utility DB when NULL.                                       |
 | `@WhatIf`                 | BIT           |            1 | `1` = DRYRUN (log/return only); `0` = execute.                                                |
 
 ---

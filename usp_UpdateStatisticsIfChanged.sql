@@ -75,7 +75,7 @@ GO
 /****** Output:      Rows logged to DBA.UpdateStatsLog with action, status, change%, command, and details.       ****/
 /******              Progress messages printed as stats are analyzed and updated.                                ****/
 /****** Created by:  Mike Fuller                                                                                 ****/
-/****** Date Updated: 01/08/2026                                                                                 ****/
+/****** Date Updated: 2026-02-07                                                                                 ****/
 /****** Version:     2.1.1 (cross-DB, central log, progress messages)                                            ****/
 /******                                                                                               ¯\_(ツ)_/¯ ****/
 /********************************************************************************************************************/
