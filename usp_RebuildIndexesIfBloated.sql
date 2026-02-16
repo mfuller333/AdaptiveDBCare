@@ -487,7 +487,7 @@ BEGIN
     BEGIN
         IF @StopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @StopAtUtc
         BEGIN
-            SET @StopAtUtcStr = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
+            DECLARE @StopAtUtcStr NVARCHAR(30) = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
 
             RAISERROR(N'MaxRuntimeMinutes reached (stop_at_utc=%s). Halting before starting database: [%s].',
                       10, 1, @StopAtUtcStr, @db) WITH NOWAIT;
