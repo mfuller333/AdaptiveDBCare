@@ -85,7 +85,7 @@ ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @MaxDurationMinutes           INT           = NULL,           -- RESUMABLE = ON for online rebuilds when supported (SQL 2019+).
       @DelayMsBetweenCommands       INT           = NULL,
       @MaxRuntimeMinutes            INT           = NULL,           -- NEW: overall runtime cap (minutes);
-      @WhatIf                       BIT           = 1               -- set 0 for Dry run: log/print only
+      @WhatIf                       BIT           = 1               -- set 1 for Dry run: log/print only
 AS
 BEGIN
     SET NOCOUNT ON;
