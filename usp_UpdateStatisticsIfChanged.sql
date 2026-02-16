@@ -98,24 +98,12 @@ BEGIN
     BEGIN
         SELECT param_name, sql_type, default_value, description, example
         FROM (VALUES
-            (N'@TargetDatabases',        N'NVARCHAR(MAX)',  N'NULL',
-                N'CSV or ALL_USER_DBS (exact case). Use ''-DbName'' to exclude.',
-                N'@TargetDatabases = N''ALL_USER_DBS,-DBA,-UtilityDb'''),
-            (N'@ChangeThresholdPercent', N'DECIMAL(6,2)',   N'NULL',
-                N'Update when change% >= this (dm_db_stats_properties).',
-                N'@ChangeThresholdPercent = 20.0'),
-            (N'@ChangeScope',            N'VARCHAR(20)',    N'NULL',
-                N'ALL_CHANGES to update any stats with changes; else uses threshold.',
-                N'@ChangeScope = ''ALL_CHANGES'''),
-            (N'@SampleMode',             N'VARCHAR(12)',    N'''DEFAULT''',
-                N'FULLSCAN, DEFAULT, or SAMPLED.',
-                N'@SampleMode = ''SAMPLED'''),
-            (N'@SamplePercent',          N'DECIMAL(6,2)',   N'NULL',
-                N'When @SampleMode = SAMPLED: 1..100 (rounded to whole % on SQL 2014).',
-                N'@SamplePercent = 10.0'),
-            (N'@WhatIf',                 N'BIT',            N'1',
-                N'1=dry-run (log/print only); 0=execute UPDATE STATISTICS.',
-                N'@WhatIf = 0')
+            (N'@TargetDatabases',        N'NVARCHAR(MAX)',  N'NULL', N'CSV or ALL_USER_DBS (exact case). Use ''-DbName'' to exclude.', N'@TargetDatabases = N''ALL_USER_DBS,-DBA,-UtilityDb'''),
+            (N'@ChangeThresholdPercent', N'DECIMAL(6,2)',   N'NULL', N'Update when change% >= this (dm_db_stats_properties).', N'@ChangeThresholdPercent = 20.0'),
+            (N'@ChangeScope',            N'VARCHAR(20)',    N'NULL', N'ALL_CHANGES to update any stats with changes; else uses threshold.', N'@ChangeScope = ''ALL_CHANGES'''),
+            (N'@SampleMode',             N'VARCHAR(12)',    N'''DEFAULT''', N'FULLSCAN, DEFAULT, or SAMPLED.',  N'@SampleMode = ''SAMPLED'''),
+            (N'@SamplePercent',          N'DECIMAL(6,2)',   N'NULL', N'When @SampleMode = SAMPLED: 1..100 (rounded to whole % on SQL 2014).', N'@SamplePercent = 10.0'),
+            (N'@WhatIf',                 N'BIT',            N'1', N'1=dry-run (log/print only); 0=execute UPDATE STATISTICS.', N'@WhatIf = 0')
         ) d(param_name, sql_type, default_value, description, example);
 
         SELECT example_label, example_command
