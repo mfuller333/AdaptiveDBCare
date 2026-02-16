@@ -30,15 +30,18 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******              @MinAvgFragmentSizePages    = avg_fragment_size_in_pages threshold (default 8)         ******/
 /******              @ReadAheadMinPageCount      = min page_count for read-ahead checks (default 50000)     ******/
 /******              @ReadAheadMinFragPct        = min fragmentation pct for read-ahead checks (default 30) ******/
-/******              @ReadAheadMinScanOps        = min scans+lookups since restart (default 1000)           ******/
+/******              @ReadAheadMinScanOps        = min scans + lookups since restart (default 1000)         ******/
 /******              @ReadAheadLookbackDays      = accept recent last_user_scan (default 7)                 ******/
 /******                                                                                                     ******/
 /******              Low fill factor avoidance:                                                             ******/
-/******              @SkipLowFillFactor          = 1 apply guardrails (default 1)                           ******/
-/******              @LowFillFactorThreshold     = treat <= this as intentionally sparse (default 80)       ******/
+/******              @SkipLowFillFactor            = 1 apply guardrails (default 1)                         ******/
+/******              @LowFillFactorThreshold       = treat <= this as intentionally sparse (default 80)     ******/
 /******              @LowFillFactorDensitySlackPct = require much worse density for low FF (default 15.0)   ******/
-/******              @ReadAheadMinFillFactor     = require FF >= this for read-ahead path (default 90)      ******/
+/******              @ReadAheadMinFillFactor       = require FF >= this for read-ahead path (default 90)    ******/
 /******                                                                                                     ******/
+/******              @MaxRuntimeMinutes          = OPTIONAL overall runtime cap in minutes. When exceeded,  ******/
+/******                                           proc stops starting new rebuilds after the current        ******/
+/******                                           rebuild completes. NULL = no runtime limit.               ******/
 /******              Online + rebuild options: ONLINE, MAXDOP, SORT_IN_TEMPDB, compression, resumable, etc. ******/
 /******                                                                                                     ******/
 /****** Output:      1) Messages: STARTING db, per-index progress, COMPLETED db.                            ******/
@@ -47,41 +50,42 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 /******                 source_fill_factor, fill_factor_guard_applied                                       ******/
 /******                                                                                                     ******/
 /****** Created by:   Mike Fuller                                                                           ******/
-/****** Date Updated: 2026-02-07                                                                            ******/
-/****** Version:      3.1.1                                                                       ¯\_(ツ)_/¯******/
+/****** Date Updated: 2026-02-16                                                                            ******/
+/****** Version:      3.2                                                                         ¯\_(ツ)_/¯******/
 /*****************************************************************************************************************/
 
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                         BIT           = 0,
       @TargetDatabases              NVARCHAR(MAX),                  -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
-      @Indexes                      NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. ALL_INDEXES or CSV tokens; supports exclusions with leading '-'
+      @Indexes                      NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. 'ALL_INDEXES' or CSV tokens; supports exclusions with leading '-'
       @MinPageDensityPct            DECIMAL(5,2)  = 70.0,
       @MinPageCount                 INT           = 1000,
-      @MinAvgFragmentSizePages      INT           = 8,
+      @MinAvgFragmentSizePages      INT           = 8,              -- read-ahead path: avg_fragment_size_in_pages threshold 8
       @ReadAheadMinPageCount        INT           = 50000,          -- read-ahead path: only consider large leaf partitions
       @ReadAheadMinFragPct          DECIMAL(5,2)  = 30.0,           -- read-ahead path: avoid trivial fragmentation noise
       @ReadAheadMinScanOps          BIGINT        = 1000,           -- read-ahead path: require scan evidence (since last restart)
       @ReadAheadLookbackDays        INT           = 7,              -- read-ahead path: accept recent last_user_scan 
-      @ReadAheadMinFillFactor       TINYINT       = 90,
-      @SkipLowFillFactor            BIT           = 1,
-      @LowFillFactorThreshold       TINYINT       = 80,
-      @LowFillFactorDensitySlackPct DECIMAL(5,2)  = 15.0,
-      @UseExistingFillFactor        BIT           = 1,
-      @FillFactor                   TINYINT       = NULL,
+      @ReadAheadMinFillFactor       TINYINT       = 90,             -- read-ahead path: only consider indexes with a set fillfactor of >=90
+      @SkipLowFillFactor            BIT           = 1,              -- skip indentionally low fill factors
+      @LowFillFactorThreshold       TINYINT       = 80,             -- threshold to consider  
+      @LowFillFactorDensitySlackPct DECIMAL(5,2)  = 15.0,           -- slack you put in when they have a low fillfactor
+      @UseExistingFillFactor        BIT           = 1,              -- use existing or if = 0  use below FillFactor
+      @FillFactor                   TINYINT       = NULL,           -- overide existing FillFactor with this value
       @Online                       BIT           = 1,
       @MaxDOP                       INT           = NULL,
       @SortInTempdb                 BIT           = 1,
-      @UseCompressionFromSource     BIT           = 1,
-      @ForceCompression             NVARCHAR(20)  = NULL,
+      @UseCompressionFromSource     BIT           = 1,              -- use existing compresion or force compression on rebuild
+      @ForceCompression             NVARCHAR(20)  = NULL,           -- NONE, ROW, or PAGE
       @SampleMode                   VARCHAR(16)   = 'SAMPLED',      -- SAMPLED | DETAILED
       @CaptureTrendingSignals       BIT           = 0,              -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
       @LogDatabase                  SYSNAME       = NULL,
       @WaitAtLowPriorityMinutes     INT           = NULL,
       @AbortAfterWait               NVARCHAR(20)  = NULL,           -- NONE | SELF | BLOCKERS
-      @Resumable                    BIT           = 0,
-      @MaxDurationMinutes           INT           = NULL,
+      @Resumable                    BIT           = 0,              
+      @MaxDurationMinutes           INT           = NULL,           -- RESUMABLE = ON for online rebuilds when supported (SQL 2019+).
       @DelayMsBetweenCommands       INT           = NULL,
-      @WhatIf                       BIT           = 1
+      @MaxRuntimeMinutes            INT           = NULL,            -- NEW: overall runtime cap (minutes);
+      @WhatIf                       BIT           = 1               -- set 0 for Dry run: log/print only
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -121,6 +125,7 @@ BEGIN
              (N'@Resumable',                    N'BIT',            N'0',               N'RESUMABLE = ON for online rebuilds when supported (SQL 2019+).', N'1'),
              (N'@MaxDurationMinutes',           N'INT',            N'NULL',            N'Resumable MAX_DURATION minutes.', N'60'),
              (N'@DelayMsBetweenCommands',       N'INT',            N'NULL',            N'Optional delay between commands in milliseconds.', N'5000'),
+             (N'@MaxRuntimeMinutes',            N'INT',            N'NULL',            N'Optional overall runtime cap (minutes). When exceeded, the proc stops starting new rebuilds after the current rebuild completes. NULL = unlimited.', N'120'),
              (N'@WhatIf',                       N'BIT',            N'1',               N'Dry run: log/print only.', N'0')
         ) d(param_name, sql_type, default_value, description, example)
         ORDER BY param_name;
@@ -211,6 +216,10 @@ BEGIN
     IF @DelayMsBetweenCommands IS NOT NULL AND @DelayMsBetweenCommands < 0
     BEGIN RAISERROR('@DelayMsBetweenCommands must be >= 0.',16,1); RETURN; END
 
+    IF @MaxRuntimeMinutes IS NOT NULL AND @MaxRuntimeMinutes <= 0
+    BEGIN RAISERROR('@MaxRuntimeMinutes must be a positive integer when provided.',16,1); RETURN; END
+
+
     IF UPPER(ISNULL(@SampleMode,'')) COLLATE DATABASE_DEFAULT NOT IN (N'SAMPLED' COLLATE DATABASE_DEFAULT,N'DETAILED' COLLATE DATABASE_DEFAULT)
     BEGIN RAISERROR('@SampleMode must be SAMPLED or DETAILED.',16,1); RETURN; END
 
@@ -247,6 +256,17 @@ BEGIN
     BEGIN
         RAISERROR('Invalid @ForceCompression for rowstore. Use NONE, ROW, or PAGE.',16,1); RETURN;
     END
+
+    DECLARE @RunStartUtc DATETIME2(3) = SYSUTCDATETIME();
+    DECLARE @StopAtUtc   DATETIME2(3) =
+        CASE WHEN @MaxRuntimeMinutes IS NULL
+             THEN NULL
+             ELSE DATEADD(MINUTE, @MaxRuntimeMinutes, @RunStartUtc)
+        END;
+
+    IF @StopAtUtc IS NOT NULL
+        RAISERROR(N'Run time cap enabled: MaxRuntimeMinutes=%d, stop_at_utc=%s', 10, 1,
+                  @MaxRuntimeMinutes, CONVERT(NVARCHAR(30), @StopAtUtc, 126)) WITH NOWAIT;
 
     -- Parse targets
     IF OBJECT_ID('tempdb..#includes')       IS NOT NULL DROP TABLE #includes;
@@ -448,6 +468,7 @@ BEGIN
         END
     END;
     -- Iterate per target DB
+    DECLARE @StopRequested BIT = 0;  
     DECLARE @db SYSNAME;
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT db_name FROM #targets ORDER BY db_name;
     OPEN cur;
@@ -455,6 +476,13 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
+        IF @StopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @StopAtUtc
+        BEGIN
+            RAISERROR(N'MaxRuntimeMinutes reached (stop_at_utc=%s). Halting before starting database: [%s].',
+                      10, 1, CONVERT(NVARCHAR(30), @StopAtUtc, 126), @db) WITH NOWAIT;
+            BREAK;
+        END
+
         IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @db AND state = 0 AND is_read_only = 0)
         BEGIN
             RAISERROR('Skipping database "%s": not ONLINE and read-write.',10,1,@db) WITH NOWAIT;
@@ -667,6 +695,9 @@ BEGIN
         SET DEADLOCK_PRIORITY LOW;
 
         DECLARE @msg NVARCHAR(4000);
+
+        DECLARE @stopAtUtc DATETIME2(3) = @pStopAtUtc;
+        SET @pStopRequested = 0;
 
         IF OBJECT_ID(''tempdb..#candidates'') IS NOT NULL DROP TABLE #candidates;
         CREATE TABLE #candidates
@@ -1242,6 +1273,28 @@ BEGIN
 
         WHILE @i <= @imax
         BEGIN
+            IF @stopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @stopAtUtc
+            BEGIN
+                IF @pWhatIf = 0
+                BEGIN
+                    UPDATE l
+                    SET [status] = ''SKIPPED_MAXRUNTIME'',
+                        error_message = LEFT(
+                            N''Skipped due to MaxRuntimeMinutes limit reached (stop_at_utc='' +
+                            CONVERT(NVARCHAR(30), @stopAtUtc, 126) + N'').''
+                        , 4000)
+                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                    JOIN #exec AS e ON e.log_id = l.log_id
+                    WHERE e.rn >= @i
+                      AND l.[status] = ''PENDING'';
+                END;
+
+                SET @pStopRequested = 1;
+                RAISERROR(N''MaxRuntimeMinutes reached; stopping before starting next rebuild in database: [%s].'',
+                          10, 1, @pDbName) WITH NOWAIT;
+                RETURN;
+            END
+
             SELECT
                 @cmd = cmd,
                 @log_id = log_id,
@@ -1434,6 +1487,27 @@ BEGIN
                     END
                 END CATCH
             END
+            IF @stopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @stopAtUtc
+            BEGIN
+                IF @pWhatIf = 0
+                BEGIN
+                    UPDATE l
+                    SET [status] = ''SKIPPED_MAXRUNTIME'',
+                        error_message = LEFT(
+                            N''Skipped due to MaxRuntimeMinutes limit reached (stop_at_utc='' +
+                            CONVERT(NVARCHAR(30), @stopAtUtc, 126) + N'').''
+                        , 4000)
+                    FROM ' + @qLogDb + N'.[DBA].[IndexBloatRebuildLog] AS l
+                    JOIN #exec AS e ON e.log_id = l.log_id
+                    WHERE e.rn > @i
+                      AND l.[status] = ''PENDING'';
+                END;
+
+                SET @pStopRequested = 1;
+                RAISERROR(N''MaxRuntimeMinutes reached; stopping after completing rebuild in database: [%s].'',
+                          10, 1, @pDbName) WITH NOWAIT;
+                RETURN;
+            END
 
             IF @delay IS NOT NULL WAITFOR DELAY @delay;
             SET @i += 1;
@@ -1443,6 +1517,8 @@ BEGIN
         --change collations
         SET @sql = REPLACE(@sql, N'<<DBCOLLATION>>',  @DbCollation);
         SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
+
+        SET @StopRequested = 0;
 
         EXEC sys.sp_executesql
             @sql,
@@ -1473,7 +1549,9 @@ BEGIN
               @pMaxDurationMinutes INT,
               @pDelayMsBetweenCommands INT,
               @pIncludeDataCompressionOption BIT,
-              @pIncludeOnlineOption BIT',
+              @pIncludeOnlineOption BIT,
+              @pStopAtUtc DATETIME2(3),
+              @pStopRequested BIT OUTPUT',
               @pDbName                       = @db,
               @pMinPageDensityPct            = @MinPageDensityPct,
               @pMinPageCount                 = @MinPageCount,
@@ -1502,8 +1580,18 @@ BEGIN
               @pDelayMsBetweenCommands       = @DelayMsBetweenCommands,
               @pIncludeDataCompressionOption = @IncludeDataCompressionOption,
               @pIncludeOnlineOption          = @IncludeOnlineOption;
+              @pStopAtUtc                    = @StopAtUtc,
+              @pStopRequested                = @StopRequested OUTPUT;
 
-        RAISERROR(N'===== COMPLETED database: [%s] =====', 10, 1, @db) WITH NOWAIT;
+        IF @StopRequested = 1
+        BEGIN
+            RAISERROR(N'===== HALTING after database: [%s] due to MaxRuntimeMinutes =====', 10, 1, @db) WITH NOWAIT;
+            BREAK;
+        END
+        ELSE
+        BEGIN
+            RAISERROR(N'===== COMPLETED database: [%s] =====', 10, 1, @db) WITH NOWAIT;
+        END
 
         FETCH NEXT FROM cur INTO @db;
     END
