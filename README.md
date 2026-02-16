@@ -1,3 +1,4 @@
+
 # AdaptiveDBCare — Multi-Database Index & Statistics Optimization Release
 
 This release of **AdaptiveDBCare** introduces coordinated, cross-database index rebuild and statistics update capabilities, enhanced telemetry, safer sampling, richer logging, and improved operator visibility. It elevates AdaptiveDBCare from single-database routines into a unified, intelligent maintenance engine for large SQL Server estates.
@@ -6,14 +7,14 @@ This release of **AdaptiveDBCare** introduces coordinated, cross-database index 
 
 # DBA.usp_RebuildIndexesIfBloated
 
-**Version:** **3.1.1**
-**Last updated:** **2026-02-07**
+**Version:** **3.2**
+**Last updated:** **2026-02-16**
 
 ---
 
 ## What this procedure does
 
-Rebuild **only** what’s bloated — and only what is truly harmful to SSD read-ahead.
+Rebuild **only** what’s bloated, and only what is truly harmful to SSD read-ahead.
 
 This procedure scans **leaf-level rowstore** index **partitions** and flags a partition as a rebuild candidate when **one (or both)** of these conditions are true:
 
@@ -48,7 +49,7 @@ Even on SSD, that translates to real cost: more logical reads, more memory press
 
 On SSD, **sequential is still cheaper than random**, and SQL Server’s read-ahead performs best when it can pull **longer runs**. Very small fragment sizes mean scans turn into a pile of tiny read requests and the engine can’t read ahead efficiently.
 
-That said: read-ahead fragmentation only matters when an object is **large** and actually **scanned** — which is why the READ_AHEAD path is gated.
+That said: read-ahead fragmentation only matters when an object is **large** and actually **scanned**, which is why the READ_AHEAD path is gated.
 
 ---
 
@@ -73,7 +74,7 @@ A partition is treated as a read-ahead candidate only when **all** of the follow
   * `last_user_scan` within `@ReadAheadLookbackDays` (default **7**)
     *Why:* if nothing is scanning it, read-ahead quality is irrelevant.
 
-> Note: scan evidence uses `sys.dm_db_index_usage_stats`, which resets when SQL Server restarts. That’s a feature, not a bug: it keeps the gating tied to *recent* reality.
+> Note: scan evidence uses `sys.dm_db_index_usage_stats`, which resets when SQL Server restarts. That’s a feature, not a bug: it keeps the gating tied to recent reality.
 
 ---
 
@@ -84,6 +85,23 @@ Low fill factor is often intentional (write-heavy OLTP, split control, hot range
 Density-based rebuilds avoid rebuilding low fill factor indexes (intentional free space) unless density is **extremely** poor.
 
 This prevents rebuilding “sparse by design” objects and immediately reintroducing the same free space the next time writes hit.
+
+---
+
+## What’s new in 3.2
+
+This is a **non-breaking enhancement release** focused on safer runtime control for scheduled maintenance windows.
+
+* **New overall runtime cap: `@MaxRuntimeMinutes`**
+
+  * Optional procedure-level runtime budget (minutes).
+  * When exceeded, the procedure **stops starting new rebuilds after the current rebuild completes**.
+  * `NULL` means no runtime limit.
+
+This complements resumable rebuild controls:
+
+* `@MaxRuntimeMinutes` caps **the whole run**.
+* `@MaxDurationMinutes` caps **each resumable index operation** (SQL 2019+, ONLINE only).
 
 ---
 
@@ -99,7 +117,7 @@ This is a **non-breaking patch release** focused on correctness and operator cla
   * Correct `RAISERROR … WITH NOWAIT` formatting to avoid edge-case failures during progress output.
 * **Read-ahead gating enforced consistently**
 
-  * Ensures the READ_AHEAD path cannot trigger unless **every** gate is satisfied (no “partial gate leakage”).
+  * Ensures the READ_AHEAD path cannot trigger unless **every** gate is satisfied (no partial gate leakage).
 * **Candidate reason is always populated**
 
   * Logged `candidate_reason` is consistently `DENSITY` or `READ_AHEAD`.
@@ -111,7 +129,7 @@ No breaking changes intended.
 ## What’s new in 3.1
 
 * **Read-ahead path is now tightly gated (fewer false positives)**
-  The read-ahead signal (`avg_fragment_size_in_pages`) is now *only* allowed to trigger rebuilds when the partition is large enough and there is real scan evidence.
+  The read-ahead signal (`avg_fragment_size_in_pages`) is now only allowed to trigger rebuilds when the partition is large enough and there is real scan evidence.
 
   New read-ahead guardrail parameters:
 
@@ -122,7 +140,7 @@ No breaking changes intended.
   * `@ReadAheadMinFillFactor` (default **90**)
 
 * **Low fill factor avoidance (stop rebuilding “sparse by design”)**
-  Density-based rebuilds now avoid rebuilding indexes with low fill factor (intentional free space) unless density is **extremely** poor.
+  Density-based rebuilds now avoid rebuilding indexes with low fill factor (intentional free space) unless density is extremely poor.
 
   New low-FF parameters:
 
@@ -131,14 +149,14 @@ No breaking changes intended.
   * `@LowFillFactorDensitySlackPct` (default **15.0**)
 
 * **New logged decision signals**
-  The log table now records *why* a partition was selected, and the fill factor context that influenced the decision:
+  The log table now records why a partition was selected, and the fill factor context that influenced the decision:
 
   * `candidate_reason` = `DENSITY` | `READ_AHEAD`
   * `source_fill_factor`
   * `fill_factor_guard_applied`
 
 * **Clearer default logging behavior**
-  If you **do not** specify `@LogDatabase`, the procedure will create/maintain a log table **in each target database**.
+  If you do not specify `@LogDatabase`, the procedure will create/maintain a log table in each target database.
 
   * Default (`@LogDatabase = NULL`): each target DB gets its own `[DBA].[IndexBloatRebuildLog]`
   * Central logging (`@LogDatabase = N'UtilityDb'`): one log table in the specified DB, recording rows for all targets
@@ -169,18 +187,23 @@ Existing automation continues to work as-is, but with stricter rebuild gating (b
 * Candidate detection supports **two independent signals**:
 
   * low density (`avg_page_space_used_in_percent`)
-  * low avg fragment size (`avg_fragment_size_in_pages`) for SSD read-ahead (**now tightly gated**)
+  * low avg fragment size (`avg_fragment_size_in_pages`) for SSD read-ahead (tightly gated)
 
 * **Read-ahead path guardrails** (v3.1):
 
   * minimum size: `@ReadAheadMinPageCount`
   * minimum fragmentation: `@ReadAheadMinFragPct`
   * fill factor gate: `@ReadAheadMinFillFactor`
-  * scan evidence: `@ReadAheadMinScanOps` **or** recent `last_user_scan` within `@ReadAheadLookbackDays`
+  * scan evidence: `@ReadAheadMinScanOps` or recent `last_user_scan` within `@ReadAheadLookbackDays`
 
 * **Low fill factor guardrails** (v3.1):
 
   * avoid rebuilding low-FF indexes unless density is far worse than the normal threshold
+
+* **Runtime budget guardrail** (v3.2):
+
+  * optional overall cap: `@MaxRuntimeMinutes`
+  * when exceeded, stops starting new rebuilds after the current rebuild completes
 
 * **ONLINE = ON** when supported, with optional `WAIT_AT_LOW_PRIORITY (MAX_DURATION, ABORT_AFTER_WAIT)`.
 
@@ -235,7 +258,7 @@ These are persisted for auditing/trending:
   * `fragmentation_pct` (from `avg_fragmentation_in_percent`)
   * `avg_fragment_size_pages` (from `avg_fragment_size_in_pages`)
 
-* Decision signals (newer / emphasized in v3.1):
+* Decision signals:
 
   * `candidate_reason` (`DENSITY` | `READ_AHEAD`)
   * `source_fill_factor`
@@ -258,7 +281,7 @@ These are persisted for auditing/trending:
 
 ### Usage signals used for gating (captured during evaluation)
 
-These are collected from `sys.dm_db_index_usage_stats` to qualify read-ahead candidates (scan evidence). They influence selection but are **not persisted** to the log table in v3.1:
+These are collected from `sys.dm_db_index_usage_stats` to qualify read-ahead candidates (scan evidence). They influence selection but are not persisted to the log table:
 
 * `user_seeks`, `user_scans`, `user_lookups`, `user_updates`
 * `last_user_seek`, `last_user_scan`, `last_user_lookup`
@@ -282,8 +305,8 @@ The procedure self-detects engine capabilities and quietly disables unsafe optio
 2. Deploy the procedure once, typically into a Utility or DBA database.
 3. First execution ensures `[DBA].[IndexBloatRebuildLog]` exists:
 
-   * **Default behavior (important):** if `@LogDatabase` is **NULL** (default), the procedure creates/uses the log table **inside each target database**.
-   * If `@LogDatabase` is specified, the procedure creates/uses the log table in that **single central database**.
+   * Default behavior (important): if `@LogDatabase` is `NULL` (default), the procedure creates/uses the log table inside each target database.
+   * If `@LogDatabase` is specified, the procedure creates/uses the log table in that single central database.
 
 If the log table already exists, the procedure upgrades it as needed and enforces compatible column widths to prevent retry and error-path failures.
 
@@ -318,12 +341,13 @@ If the log table already exists, the procedure upgrades it as needed and enforce
 | `@ForceCompression`             | NVARCHAR(20)  | NULL          | `NONE`, `ROW`, or `PAGE` when not preserving.                                                                                                                         |
 | `@SampleMode`                   | VARCHAR(16)   | `SAMPLED`     | `SAMPLED` or `DETAILED`.                                                                                                                                              |
 | `@CaptureTrendingSignals`       | BIT           | 0             | If `1` and `SAMPLED`, auto-upshifts to `DETAILED`.                                                                                                                    |
-| `@LogDatabase`                  | SYSNAME       | NULL          | **If NULL (default), log table is created/used in each target DB.** If set, logs centrally in the specified DB.                                                       |
+| `@LogDatabase`                  | SYSNAME       | NULL          | If NULL (default), log table is created/used in each target DB. If set, logs centrally in the specified DB.                                                           |
 | `@WaitAtLowPriorityMinutes`     | INT           | NULL          | Enables `WAIT_AT_LOW_PRIORITY (MAX_DURATION)`.                                                                                                                        |
 | `@AbortAfterWait`               | NVARCHAR(20)  | NULL          | `NONE`, `SELF`, or `BLOCKERS`.                                                                                                                                        |
 | `@Resumable`                    | BIT           | 0             | SQL Server 2019+; requires ONLINE.                                                                                                                                    |
 | `@MaxDurationMinutes`           | INT           | NULL          | RESUMABLE `MAX_DURATION`.                                                                                                                                             |
 | `@DelayMsBetweenCommands`       | INT           | NULL          | Optional delay between rebuilds in milliseconds.                                                                                                                      |
+| `@MaxRuntimeMinutes`            | INT           | NULL          | **(v3.2)** Optional overall runtime cap (minutes). When exceeded, stops starting new rebuilds after the current rebuild completes. NULL = unlimited.                  |
 | `@WhatIf`                       | BIT           | 1             | Dry run by default.                                                                                                                                                   |
 
 ---
@@ -338,6 +362,7 @@ If the log table already exists, the procedure upgrades it as needed and enforce
 * `@MinAvgFragmentSizePages` can be set to NULL to disable the SSD read-ahead trigger.
 * Read-ahead candidates must pass minimum size + fragmentation + scan evidence + fill factor gates (v3.1).
 * Low fill factor guardrails reduce rebuild churn on intentionally sparse indexes (v3.1).
+* If `@MaxRuntimeMinutes` is set, the procedure will stop starting new rebuilds once the runtime budget is exceeded (v3.2).
 
 ---
 
@@ -364,6 +389,16 @@ EXEC DBA.usp_RebuildIndexesIfBloated
     @TargetDatabases = N'ALL_USER_DBS,-DW,-ReportServer,-ReportServerTempDB',
     @LogDatabase     = N'UtilityDb',
     @WhatIf          = 0;
+```
+
+### All user DBs except DW and SSRS, central log, execute with a runtime cap (v3.2)
+
+```sql
+EXEC DBA.usp_RebuildIndexesIfBloated
+    @TargetDatabases   = N'ALL_USER_DBS,-DW,-ReportServer,-ReportServerTempDB',
+    @LogDatabase       = N'UtilityDb',
+    @MaxRuntimeMinutes = 30,
+    @WhatIf            = 0;
 ```
 
 ### One database, ONLINE with DOP 4
@@ -428,7 +463,7 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 * **Log table**: `[DBA].[IndexBloatRebuildLog]`
 
-  * **Default behavior:** if `@LogDatabase` is NULL, the log table is created/used in **each target database**
+  * Default behavior: if `@LogDatabase` is NULL, the log table is created/used in each target database
   * Central logging: specify `@LogDatabase` to log all targets into one DB
 
   Captures:
@@ -462,8 +497,8 @@ EXEC DBA.usp_RebuildIndexesIfBloated
 
 ## Versioning
 
-* **Version**: 3.1.1
-* **Last updated**: 2026-02-07
+* **Version**: **3.2**
+* **Last updated**: **2026-02-16**
 
 ---
 
@@ -480,9 +515,9 @@ MIT licensed. Rebuild responsibly.
 **Version:** **1.3**
 **Last updated:** **2025-11-16**
 
-From a **single** utility DB, update statistics in one or many target databases **only when they’ve changed** — either by a **threshold %** or using `ALL_CHANGES`. Supports `FULLSCAN`, `DEFAULT`, or `SAMPLED <n>%`. All actions are centrally logged.
+From a single utility DB, update statistics in one or many target databases only when they’ve changed, either by a threshold % or using `ALL_CHANGES`. Supports `FULLSCAN`, `DEFAULT`, or `SAMPLED <n>%`. All actions are centrally logged.
 
-> **Works on SQL Server 2014–2025.** Designed to be deployed once in a Utility/DBA DB and run against many user DBs. Defaults to **WhatIf**.
+> Works on SQL Server 2014–2025. Designed to be deployed once in a Utility/DBA DB and run against many user DBs. Defaults to WhatIf.
 
 ---
 
@@ -510,22 +545,22 @@ Edge case handling:
 ## Why this exists
 
 * Stop carpet-bombing stats: touch the ones that moved.
-* Keep the story straight: central log shows **what** you updated, **why**, **how**, and **with what sample**.
+* Keep the story straight: central log shows what you updated, why, how, and with what sample.
 
 ---
 
 ## Features
 
-* Multi-DB orchestration: CSV, **ALL_USER_DBS**, and `-DbName` exclusions; online, read-write DBs only.
+* Multi-DB orchestration: CSV, ALL_USER_DBS, and `-DbName` exclusions; online, read-write DBs only.
 * Candidate detection via `sys.dm_db_stats_properties`:
 
-  * `ALL_CHANGES`: any stats with `modification_counter > 0`
+  * ALL_CHANGES: any stats with `modification_counter > 0`
   * Threshold mode: `change% >= @ChangeThresholdPercent` (or `rows=0 AND modification>0`)
 * Sampling modes: `FULLSCAN`, `DEFAULT`, or `SAMPLED n%`
-  *Note: value is rounded to a whole percent for SQL Server 2014.*
+  Note: value is rounded to a whole percent for SQL Server 2014.
 * Builds per-object `UPDATE STATISTICS` commands prefixed with `USE <DB>;` for safety.
-* Central logging to `[DBA].[UpdateStatsLog]`, including a **run_id** to group a run.
-* Defaults to **WhatIf** (log/return only).
+* Central logging to `[DBA].[UpdateStatsLog]`, including a `run_id` to group a run.
+* Defaults to WhatIf (log/return only).
 
 ---
 
@@ -534,20 +569,20 @@ Edge case handling:
 | Parameter                 | Type          |      Default | Notes                                                                                         |
 | ------------------------- | ------------- | -----------: | --------------------------------------------------------------------------------------------- |
 | `@Help`                   | BIT           |            0 | `1` prints help and examples; returns.                                                        |
-| `@TargetDatabases`        | NVARCHAR(MAX) | **required** | CSV list or **ALL_USER_DBS** (exact case) with `-DbName` exclusions.                          |
+| `@TargetDatabases`        | NVARCHAR(MAX) | **required** | CSV list or ALL_USER_DBS (exact case) with `-DbName` exclusions.                              |
 | `@ChangeThresholdPercent` | DECIMAL(6,2)  |         NULL | Used when `@ChangeScope IS NULL`. Must be `0–100`.                                            |
-| `@ChangeScope`            | VARCHAR(20)   |         NULL | Exact-case token **ALL_CHANGES** to update any stats with changes; otherwise threshold mode.  |
-| `@SampleMode`             | VARCHAR(12)   |    `DEFAULT` | Exact-case tokens: **FULLSCAN**, **DEFAULT**, **SAMPLED**.                                    |
+| `@ChangeScope`            | VARCHAR(20)   |         NULL | Exact-case token ALL_CHANGES to update any stats with changes; otherwise threshold mode.      |
+| `@SampleMode`             | VARCHAR(12)   |    `DEFAULT` | Exact-case tokens: FULLSCAN, DEFAULT, SAMPLED.                                                |
 | `@SamplePercent`          | DECIMAL(6,2)  |            1 | Required when `@SampleMode='SAMPLED'`. Range `>0` to `<=100`; rounded to whole % on SQL 2014. |
-| `@LogDatabase`            | SYSNAME       |         NULL | Central log DB; defaults to **this** utility DB when NULL.                                       |
+| `@LogDatabase`            | SYSNAME       |         NULL | Central log DB; defaults to this utility DB when NULL.                                        |
 | `@WhatIf`                 | BIT           |            1 | `1` = DRYRUN (log/return only); `0` = execute.                                                |
 
 ---
 
 ## Output & logging
 
-* **Result set**: per run, a summary by object and stats name with `action`, `status`, and counts.
-* **Log table**: `[DBA].[UpdateStatsLog]` gets one row per candidate/action with:
+* Result set: per run, a summary by object and stats name with `action`, `status`, and counts.
+* Log table: `[DBA].[UpdateStatsLog]` gets one row per candidate/action with:
 
   * Identity: `database_name, schema_name, table_name, stats_name, stats_id`
   * Signals: `rows, modification_counter, change_pct, last_updated, rows_sampled`
@@ -569,11 +604,11 @@ EXEC DBA.usp_UpdateStatisticsIfChanged @Help = 1;
 
 ```sql
 EXEC DBA.usp_UpdateStatisticsIfChanged
-    @TargetDatabases        = N'ALL_USER_DBS,-DBA',
-    @ChangeScope            = 'ALL_CHANGES',
-    @SampleMode             = 'SAMPLED',
-    @SamplePercent          = 20,
-    @WhatIf                 = 1;
+    @TargetDatabases  = N'ALL_USER_DBS,-DBA',
+    @ChangeScope      = 'ALL_CHANGES',
+    @SampleMode       = 'SAMPLED',
+    @SamplePercent    = 20,
+    @WhatIf           = 1;
 ```
 
 ### One DB, threshold 20%, DEFAULT (execute)
@@ -622,3 +657,5 @@ MIT. Go forth and sample responsibly.
 ## Credit
 
 Created by **Mike Fuller**.
+
+---
