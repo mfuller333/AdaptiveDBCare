@@ -263,10 +263,11 @@ BEGIN
              THEN NULL
              ELSE DATEADD(MINUTE, @MaxRuntimeMinutes, @RunStartUtc)
         END;
+    DECLARE @StopAtUtcStr NVARCHAR(30) 
 
     IF @StopAtUtc IS NOT NULL
     BEGIN
-        DECLARE @StopAtUtcStr NVARCHAR(30) = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
+        SET @StopAtUtcStr = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
 
         RAISERROR(
             N'Run time cap enabled: MaxRuntimeMinutes=%d, stop_at_utc=%s',
@@ -487,7 +488,7 @@ BEGIN
     BEGIN
         IF @StopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @StopAtUtc
         BEGIN
-            DECLARE @StopAtUtcStr NVARCHAR(30) = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
+            SET @StopAtUtcStr = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
 
             RAISERROR(N'MaxRuntimeMinutes reached (stop_at_utc=%s). Halting before starting database: [%s].',
                       10, 1, @StopAtUtcStr, @db) WITH NOWAIT;
