@@ -265,8 +265,17 @@ BEGIN
         END;
 
     IF @StopAtUtc IS NOT NULL
-        RAISERROR(N'Run time cap enabled: MaxRuntimeMinutes=%d, stop_at_utc=%s', 10, 1,
-                  @MaxRuntimeMinutes, CONVERT(NVARCHAR(30), @StopAtUtc, 126)) WITH NOWAIT;
+    BEGIN
+        DECLARE @StopAtUtcStr NVARCHAR(30) = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
+
+        RAISERROR(
+            N'Run time cap enabled: MaxRuntimeMinutes=%d, stop_at_utc=%s',
+            10,
+            1,
+            @MaxRuntimeMinutes,
+            @StopAtUtcStr
+        ) WITH NOWAIT;
+    END;
 
     -- Parse targets
     IF OBJECT_ID('tempdb..#includes')       IS NOT NULL DROP TABLE #includes;
@@ -478,8 +487,10 @@ BEGIN
     BEGIN
         IF @StopAtUtc IS NOT NULL AND SYSUTCDATETIME() >= @StopAtUtc
         BEGIN
+            SET @StopAtUtcStr = CONVERT(NVARCHAR(30), @StopAtUtc, 126);
+
             RAISERROR(N'MaxRuntimeMinutes reached (stop_at_utc=%s). Halting before starting database: [%s].',
-                      10, 1, CONVERT(NVARCHAR(30), @StopAtUtc, 126), @db) WITH NOWAIT;
+                      10, 1, @StopAtUtcStr, @db) WITH NOWAIT;
             BREAK;
         END
 
