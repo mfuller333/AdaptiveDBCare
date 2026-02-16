@@ -56,36 +56,36 @@ IF OBJECT_ID('DBA.usp_RebuildIndexesIfBloated','P') IS NULL
 
 ALTER PROCEDURE [DBA].[usp_RebuildIndexesIfBloated]
       @Help                         BIT           = 0,
-      @TargetDatabases              NVARCHAR(MAX),                  -- REQUIRED: CSV | 'ALL_USER_DBS' | negatives '-DbName'
-      @Indexes                      NVARCHAR(MAX) = N'ALL_INDEXES', -- Single DB only. 'ALL_INDEXES' or CSV tokens; supports exclusions with leading '-'
+      @TargetDatabases              NVARCHAR(MAX),                  
+      @Indexes                      NVARCHAR(MAX) = N'ALL_INDEXES', 
       @MinPageDensityPct            DECIMAL(5,2)  = 70.0,
       @MinPageCount                 INT           = 1000,
-      @MinAvgFragmentSizePages      INT           = 8,              -- read-ahead path: avg_fragment_size_in_pages threshold 8
-      @ReadAheadMinPageCount        INT           = 50000,          -- read-ahead path: only consider large leaf partitions
-      @ReadAheadMinFragPct          DECIMAL(5,2)  = 30.0,           -- read-ahead path: avoid trivial fragmentation noise
-      @ReadAheadMinScanOps          BIGINT        = 1000,           -- read-ahead path: require scan evidence (since last restart)
-      @ReadAheadLookbackDays        INT           = 7,              -- read-ahead path: accept recent last_user_scan 
-      @ReadAheadMinFillFactor       TINYINT       = 90,             -- read-ahead path: only consider indexes with a set fillfactor of >=90
-      @SkipLowFillFactor            BIT           = 1,              -- skip indentionally low fill factors
-      @LowFillFactorThreshold       TINYINT       = 80,             -- threshold to consider  
-      @LowFillFactorDensitySlackPct DECIMAL(5,2)  = 15.0,           -- slack you put in when they have a low fillfactor
-      @UseExistingFillFactor        BIT           = 1,              -- use existing or if = 0  use below FillFactor
-      @FillFactor                   TINYINT       = NULL,           -- overide existing FillFactor with this value
+      @MinAvgFragmentSizePages      INT           = 8,              
+      @ReadAheadMinPageCount        INT           = 50000,          
+      @ReadAheadMinFragPct          DECIMAL(5,2)  = 30.0,           
+      @ReadAheadMinScanOps          BIGINT        = 1000,           
+      @ReadAheadLookbackDays        INT           = 7,              
+      @ReadAheadMinFillFactor       TINYINT       = 90,             
+      @SkipLowFillFactor            BIT           = 1,              
+      @LowFillFactorThreshold       TINYINT       = 80,             
+      @LowFillFactorDensitySlackPct DECIMAL(5,2)  = 15.0,           
+      @UseExistingFillFactor        BIT           = 1,              
+      @FillFactor                   TINYINT       = NULL,           
       @Online                       BIT           = 1,
       @MaxDOP                       INT           = NULL,
       @SortInTempdb                 BIT           = 1,
-      @UseCompressionFromSource     BIT           = 1,              -- use existing compresion or force compression on rebuild
-      @ForceCompression             NVARCHAR(20)  = NULL,           -- NONE, ROW, or PAGE
-      @SampleMode                   VARCHAR(16)   = 'SAMPLED',      -- SAMPLED | DETAILED
-      @CaptureTrendingSignals       BIT           = 0,              -- if 1 and SampleMode=SAMPLED, auto-upshift to DETAILED
+      @UseCompressionFromSource     BIT           = 1,              
+      @ForceCompression             NVARCHAR(20)  = NULL,          
+      @SampleMode                   VARCHAR(16)   = 'SAMPLED',       
+      @CaptureTrendingSignals       BIT           = 0,              
       @LogDatabase                  SYSNAME       = NULL,
       @WaitAtLowPriorityMinutes     INT           = NULL,
-      @AbortAfterWait               NVARCHAR(20)  = NULL,           -- NONE | SELF | BLOCKERS
+      @AbortAfterWait               NVARCHAR(20)  = NULL,            
       @Resumable                    BIT           = 0,              
-      @MaxDurationMinutes           INT           = NULL,           -- RESUMABLE = ON for online rebuilds when supported (SQL 2019+).
+      @MaxDurationMinutes           INT           = NULL,            
       @DelayMsBetweenCommands       INT           = NULL,
-      @MaxRuntimeMinutes            INT           = NULL,           -- NEW: overall runtime cap (minutes);
-      @WhatIf                       BIT           = 1               -- set 1 for Dry run: log/print only
+      @MaxRuntimeMinutes            INT           = NULL,            
+      @WhatIf                       BIT           = 1                
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -1353,7 +1353,7 @@ BEGIN
             IF @pSortInTempdb = 1
                 SET @cmdOffline = REPLACE(@cmdOffline, N''SORT_IN_TEMPDB = OFF'', N''SORT_IN_TEMPDB = ON'');
 
-            SET @msg = N''Rebuilding ('' + @reason + N'') '' 
+            SET @msg = CASE WHEN @pWhatIf = 1 THEN N''WHATIF: Would rebuild ('' ELSE N''Rebuilding ('' END + @reason + N'') ''
                     + QUOTENAME(@schema) + N''.'' + QUOTENAME(@table) + N''.'' + QUOTENAME(@index)
                     + N'' (partition '' + CONVERT(NVARCHAR(12), @part)
                     + N'', pages = '' + CONVERT(NVARCHAR(20), @pages)
@@ -1579,7 +1579,7 @@ BEGIN
               @pMaxDurationMinutes           = @MaxDurationMinutes,
               @pDelayMsBetweenCommands       = @DelayMsBetweenCommands,
               @pIncludeDataCompressionOption = @IncludeDataCompressionOption,
-              @pIncludeOnlineOption          = @IncludeOnlineOption;
+              @pIncludeOnlineOption          = @IncludeOnlineOption,
               @pStopAtUtc                    = @StopAtUtc,
               @pStopRequested                = @StopRequested OUTPUT;
 
