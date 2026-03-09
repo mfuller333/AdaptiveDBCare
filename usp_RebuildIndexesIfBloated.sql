@@ -1666,7 +1666,7 @@ BEGIN
 
                 FETCH NEXT FROM cur INTO @db;
                 CONTINUE;
-            END
+            END;
 
             THROW;
         END CATCH
