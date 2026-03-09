@@ -335,24 +335,44 @@ BEGIN
 
     IF @AllUsers = 1
     BEGIN
-        INSERT #targets(db_name)
-        SELECT d.name
+        INSERT #targets
+        (
+            db_name
+        )
+        SELECT
+            d.name
         FROM sys.databases AS d
-        WHERE 
-          d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution') AND
-          d.state = 0 AND
-          d.is_read_only = 0;
+        WHERE d.name NOT IN (N'master', N'model', N'msdb', N'tempdb', N'distribution')
+        AND d.state = 0
+        AND d.is_read_only = 0
+        AND HAS_DBACCESS(d.name) = 1
+        AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE'
+        AND COALESCE(sys.fn_hadr_is_primary_replica(d.name), 1) = 1;
     END
-
-    INSERT #targets(db_name)
-    SELECT i.name
-    FROM #includes AS i
-    JOIN sys.databases AS d ON
-      d.name = i.name COLLATE DATABASE_DEFAULT
-    WHERE 
-      d.name NOT IN (N'master',N'model',N'msdb',N'tempdb',N'distribution') AND
-      d.state = 0 AND
-      d.is_read_only = 0 AND NOT EXISTS (SELECT 1 FROM #targets WHERE db_name = i.name);
+    ELSE 
+    BEGIN 
+        INSERT #targets
+        (
+            db_name
+        )
+        SELECT
+            i.name
+        FROM #includes AS i
+        JOIN sys.databases AS d
+            ON d.name = i.name COLLATE DATABASE_DEFAULT
+        WHERE d.name NOT IN (N'master', N'model', N'msdb', N'tempdb', N'distribution')
+        AND d.state = 0
+        AND d.is_read_only = 0
+        AND HAS_DBACCESS(d.name) = 1
+        AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE'
+        AND COALESCE(sys.fn_hadr_is_primary_replica(d.name), 1) = 1
+        AND NOT EXISTS
+        (
+            SELECT 1
+            FROM #targets
+            WHERE db_name = i.name
+        );
+    END
 
     DELETE t
     FROM #targets AS t
@@ -495,9 +515,25 @@ BEGIN
             BREAK;
         END
 
-        IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = @db AND state = 0 AND is_read_only = 0)
+        IF NOT EXISTS
+        (
+            SELECT 1
+            FROM sys.databases AS d
+            WHERE d.name = @db
+            AND d.state = 0
+            AND d.is_read_only = 0
+            AND HAS_DBACCESS(d.name) = 1
+            AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE'
+            AND COALESCE(sys.fn_hadr_is_primary_replica(d.name), 1) = 1
+        )
         BEGIN
-            RAISERROR('Skipping database "%s": not ONLINE and read-write.',10,1,@db) WITH NOWAIT;
+            RAISERROR(
+                N'Skipping database "%s": not writable/accessible on this replica (offline, read-only, no access, or AG secondary).',
+                10,
+                1,
+                @db
+            ) WITH NOWAIT;
+
             FETCH NEXT FROM cur INTO @db;
             CONTINUE;
         END
@@ -507,6 +543,29 @@ BEGIN
         DECLARE @qDb   NVARCHAR(258) = QUOTENAME(@db COLLATE DATABASE_DEFAULT);
         DECLARE @LogDb SYSNAME       = ISNULL(@LogDatabase, @db);
         DECLARE @qLogDb NVARCHAR(258)= QUOTENAME(@LogDb COLLATE DATABASE_DEFAULT);
+
+        IF NOT EXISTS
+        (
+            SELECT 1
+            FROM sys.databases AS d
+            WHERE d.name = @LogDb
+            AND d.state = 0
+            AND HAS_DBACCESS(d.name) = 1
+            AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_WRITE'
+            AND COALESCE(sys.fn_hadr_is_primary_replica(d.name), 1) = 1
+        )
+        BEGIN
+            RAISERROR(
+                N'Skipping database [%s]: log database [%s] is not writable/accessible on this replica.',
+                10,
+                1,
+                @db,
+                @LogDb
+            ) WITH NOWAIT;
+
+            FETCH NEXT FROM cur INTO @db;
+            CONTINUE;
+        END
 
         /* NEW: capture per-target and per-log collations (used later for cross-db inserts/joins) */
         DECLARE @DbCollation  SYSNAME;
@@ -1531,69 +1590,86 @@ BEGIN
         SET @sql = REPLACE(@sql, N'<<LOGCOLLATION>>', @LogCollation);
 
         SET @StopRequested = 0;
+        BEGIN TRY
+            EXEC sys.sp_executesql
+                @sql,
+                N'@pDbName SYSNAME,
+                @pMinPageDensityPct DECIMAL(5,2),
+                @pMinPageCount INT,
+                @pMinAvgFragSizePages INT,
+                @pUseExistingFillFactor BIT,
+                @pFillFactor TINYINT,
+                @pReadAheadMinPageCount INT,
+                @pReadAheadMinFragPct DECIMAL(5,2),
+                @pReadAheadMinScanOps BIGINT,
+                @pReadAheadLookbackDays INT,
+                @pReadAheadMinFillFactor TINYINT,
+                @pSkipLowFillFactor BIT,
+                @pLowFillFactorThreshold TINYINT,
+                @pLowFillFactorDensitySlackPct DECIMAL(5,2),
+                @pOnline BIT,
+                @pMaxDOP INT,
+                @pSortInTempdb BIT,
+                @pUseCompressionFromSource BIT,
+                @pForceCompression NVARCHAR(20),
+                @pSampleMode VARCHAR(16),
+                @pWhatIf BIT,
+                @pWaitAtLowPriorityMinutes INT,
+                @pAbortAfterWait NVARCHAR(20),
+                @pResumable BIT,
+                @pMaxDurationMinutes INT,
+                @pDelayMsBetweenCommands INT,
+                @pIncludeDataCompressionOption BIT,
+                @pIncludeOnlineOption BIT,
+                @pStopAtUtc DATETIME2(3),
+                @pStopRequested BIT OUTPUT',
+                @pDbName                       = @db,
+                @pMinPageDensityPct            = @MinPageDensityPct,
+                @pMinPageCount                 = @MinPageCount,
+                @pMinAvgFragSizePages          = @MinAvgFragmentSizePages,
+                @pUseExistingFillFactor        = @UseExistingFillFactor,
+                @pFillFactor                   = @FillFactor,
+                @pReadAheadMinPageCount        = @ReadAheadMinPageCount,
+                @pReadAheadMinFragPct          = @ReadAheadMinFragPct,
+                @pReadAheadMinScanOps          = @ReadAheadMinScanOps,
+                @pReadAheadLookbackDays        = @ReadAheadLookbackDays,
+                @pReadAheadMinFillFactor       = @ReadAheadMinFillFactor,
+                @pSkipLowFillFactor            = @SkipLowFillFactor,
+                @pLowFillFactorThreshold       = @LowFillFactorThreshold,
+                @pLowFillFactorDensitySlackPct = @LowFillFactorDensitySlackPct,
+                @pOnline                       = @Online,
+                @pMaxDOP                       = @MaxDOP,
+                @pSortInTempdb                 = @SortInTempdb,
+                @pUseCompressionFromSource     = @UseCompressionFromSource,
+                @pForceCompression             = @ForceCompression,
+                @pSampleMode                   = @EffectiveSampleMode,
+                @pWhatIf                       = @WhatIf,
+                @pWaitAtLowPriorityMinutes     = @WaitAtLowPriorityMinutes,
+                @pAbortAfterWait               = @AbortAfterWait,
+                @pResumable                    = @Resumable,
+                @pMaxDurationMinutes           = @MaxDurationMinutes,
+                @pDelayMsBetweenCommands       = @DelayMsBetweenCommands,
+                @pIncludeDataCompressionOption = @IncludeDataCompressionOption,
+                @pIncludeOnlineOption          = @IncludeOnlineOption,
+                @pStopAtUtc                    = @StopAtUtc,
+                @pStopRequested                = @StopRequested OUTPUT;
+        END TRY
+        BEGIN CATCH
+            IF ERROR_NUMBER() = 976
+            BEGIN
+                RAISERROR(
+                    N'Skipping database [%s]: database is not queryable on this replica at execution time (AG secondary or suspended data movement).',
+                    10,
+                    1,
+                    @db
+                ) WITH NOWAIT;
 
-        EXEC sys.sp_executesql
-            @sql,
-            N'@pDbName SYSNAME,
-              @pMinPageDensityPct DECIMAL(5,2),
-              @pMinPageCount INT,
-              @pMinAvgFragSizePages INT,
-              @pUseExistingFillFactor BIT,
-              @pFillFactor TINYINT,
-              @pReadAheadMinPageCount INT,
-              @pReadAheadMinFragPct DECIMAL(5,2),
-              @pReadAheadMinScanOps BIGINT,
-              @pReadAheadLookbackDays INT,
-              @pReadAheadMinFillFactor TINYINT,
-              @pSkipLowFillFactor BIT,
-              @pLowFillFactorThreshold TINYINT,
-              @pLowFillFactorDensitySlackPct DECIMAL(5,2),
-              @pOnline BIT,
-              @pMaxDOP INT,
-              @pSortInTempdb BIT,
-              @pUseCompressionFromSource BIT,
-              @pForceCompression NVARCHAR(20),
-              @pSampleMode VARCHAR(16),
-              @pWhatIf BIT,
-              @pWaitAtLowPriorityMinutes INT,
-              @pAbortAfterWait NVARCHAR(20),
-              @pResumable BIT,
-              @pMaxDurationMinutes INT,
-              @pDelayMsBetweenCommands INT,
-              @pIncludeDataCompressionOption BIT,
-              @pIncludeOnlineOption BIT,
-              @pStopAtUtc DATETIME2(3),
-              @pStopRequested BIT OUTPUT',
-              @pDbName                       = @db,
-              @pMinPageDensityPct            = @MinPageDensityPct,
-              @pMinPageCount                 = @MinPageCount,
-              @pMinAvgFragSizePages          = @MinAvgFragmentSizePages,
-              @pUseExistingFillFactor        = @UseExistingFillFactor,
-              @pFillFactor                   = @FillFactor,
-              @pReadAheadMinPageCount        = @ReadAheadMinPageCount,
-              @pReadAheadMinFragPct          = @ReadAheadMinFragPct,
-              @pReadAheadMinScanOps          = @ReadAheadMinScanOps,
-              @pReadAheadLookbackDays        = @ReadAheadLookbackDays,
-              @pReadAheadMinFillFactor       = @ReadAheadMinFillFactor,
-              @pSkipLowFillFactor            = @SkipLowFillFactor,
-              @pLowFillFactorThreshold       = @LowFillFactorThreshold,
-              @pLowFillFactorDensitySlackPct = @LowFillFactorDensitySlackPct,
-              @pOnline                       = @Online,
-              @pMaxDOP                       = @MaxDOP,
-              @pSortInTempdb                 = @SortInTempdb,
-              @pUseCompressionFromSource     = @UseCompressionFromSource,
-              @pForceCompression             = @ForceCompression,
-              @pSampleMode                   = @EffectiveSampleMode,
-              @pWhatIf                       = @WhatIf,
-              @pWaitAtLowPriorityMinutes     = @WaitAtLowPriorityMinutes,
-              @pAbortAfterWait               = @AbortAfterWait,
-              @pResumable                    = @Resumable,
-              @pMaxDurationMinutes           = @MaxDurationMinutes,
-              @pDelayMsBetweenCommands       = @DelayMsBetweenCommands,
-              @pIncludeDataCompressionOption = @IncludeDataCompressionOption,
-              @pIncludeOnlineOption          = @IncludeOnlineOption,
-              @pStopAtUtc                    = @StopAtUtc,
-              @pStopRequested                = @StopRequested OUTPUT;
+                FETCH NEXT FROM cur INTO @db;
+                CONTINUE;
+            END
+
+            THROW;
+        END CATCH
 
         IF @StopRequested = 1
         BEGIN
