@@ -512,8 +512,8 @@ MIT licensed. Rebuild responsibly.
 
 # DBA.usp_UpdateStatisticsIfChanged
 
-**Version:** **1.3**
-**Last updated:** **2025-11-16**
+**Version:** **2.2.0**
+**Last updated:** **2026-11-08**
 
 From a single utility DB, update statistics in one or many target databases only when they’ve changed, either by a threshold % or using `ALL_CHANGES`. Supports `FULLSCAN`, `DEFAULT`, or `SAMPLED <n>%`. All actions are centrally logged.
 
@@ -539,6 +539,13 @@ Two modes exist:
 Edge case handling:
 
 * stats where `rows = 0 AND modification_counter > 0` are still candidates (prevents “stale empty table stats” traps).
+* nonempty Change Tracking internal tables whose statistics have never been initialized are candidates to establish a baseline; their change metrics remain `NULL` until that update succeeds.
+
+### Change Tracking internal tables
+
+The procedure also considers [Change Tracking internal table types 209 and 210](https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-internal-tables-transact-sql). It applies the same change threshold or `ALL_CHANGES` selection after statistics are initialized. It updates each qualifying internal table once using `UPDATE STATISTICS [sys].[table]`, so all its statistics are refreshed together. The central log records that table-level command with `stats_name = ALL` and `stats_id = 0`; an empty table with no initialized statistics is skipped.
+
+SQL Server's [`sp_updatestats`](https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-updatestats-transact-sql) also handles internal tables. This procedure adds the existing per-database selection, threshold, sampling, dry-run, and central logging controls to the Change Tracking case.
 
 ---
 
@@ -556,6 +563,7 @@ Edge case handling:
 
   * ALL_CHANGES: any stats with `modification_counter > 0`
   * Threshold mode: `change% >= @ChangeThresholdPercent` (or `rows=0 AND modification>0`)
+  * Change Tracking internal tables: types 209 and 210, plus nonempty tables with uninitialized statistics
 * Sampling modes: `FULLSCAN`, `DEFAULT`, or `SAMPLED n%`
   Note: value is rounded to a whole percent for SQL Server 2014.
 * Builds per-object `UPDATE STATISTICS` commands prefixed with `USE <DB>;` for safety.
@@ -626,6 +634,7 @@ EXEC DBA.usp_UpdateStatisticsIfChanged
 ```sql
 EXEC DBA.usp_UpdateStatisticsIfChanged
     @TargetDatabases = N'Orders,Inventory',
+    @ChangeScope     = 'ALL_CHANGES',
     @SampleMode      = 'FULLSCAN',
     @LogDatabase     = N'UtilityDb',
     @WhatIf          = 1;
@@ -641,10 +650,16 @@ EXEC DBA.usp_UpdateStatisticsIfChanged
 
 ---
 
+## Change Tracking integration test
+
+Run `tests/Test-ChangeTrackingStatistics.ps1` with a disposable SQL Server test instance. It creates and removes a uniquely named database, then checks dry run, initial statistics, threshold selection, sampled and fullscan execution, and the logged outcome. The test requires permission to create and drop a database.
+
+---
+
 ## Versioning
 
-* **Version**: 1.3
-* **Last updated**: 2025-11-16
+* **Version**: 2.2.0
+* **Last updated**: 2026-11-08
 
 ---
 

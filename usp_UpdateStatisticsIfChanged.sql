@@ -71,12 +71,17 @@ GO
 /******              @SampleMode            = 'FULLSCAN' | 'DEFAULT' | 'SAMPLED'                                 ****/
 /******              @SamplePercent         = 1..100 when @SampleMode = 'SAMPLED' (rounded to INT for 2014)      ****/
 /******              @WhatIf                = 1 dry-run; 0 execute                                               ****/
+/******              Change Tracking side tables (internal types 209 and 210) use the same change criteria.      ****/
+/******              Nonempty internal tables with uninitialized stats are included to establish a baseline.    ****/
+/******              A qualifying internal table is updated once with UPDATE STATISTICS [sys].[table].          ****/
+/******              Its log row uses stats_id = 0 and stats_name = ALL; the change metrics come from the         ****/
+/******              qualifying statistic with the highest change percentage.                                   ****/
 /******                                                                                                          ****/
 /****** Output:      Rows logged to DBA.UpdateStatsLog with action, status, change%, command, and details.       ****/
 /******              Progress messages printed as stats are analyzed and updated.                                ****/
 /****** Created by:  Mike Fuller                                                                                 ****/
-/****** Date Updated: 2026-02-07                                                                                 ****/
-/****** Version:     2.1.1 (cross-DB, central log, progress messages)                                            ****/
+/****** Date Updated: 2026-11-08                                                                                 ****/
+/****** Version:     2.2.0 (Change Tracking internal table statistics)                                            ****/
 /******                                                                                               ¯\_(ツ)_/¯ ****/
 /********************************************************************************************************************/
 ALTER PROCEDURE [DBA].[usp_UpdateStatisticsIfChanged]
@@ -98,12 +103,24 @@ BEGIN
     BEGIN
         SELECT param_name, sql_type, default_value, description, example
         FROM (VALUES
-            (N'@TargetDatabases',        N'NVARCHAR(MAX)',  N'NULL', N'CSV or ALL_USER_DBS (exact case). Use ''-DbName'' to exclude.', N'@TargetDatabases = N''ALL_USER_DBS,-DBA,-UtilityDb'''),
-            (N'@ChangeThresholdPercent', N'DECIMAL(6,2)',   N'NULL', N'Update when change% >= this (dm_db_stats_properties).', N'@ChangeThresholdPercent = 20.0'),
-            (N'@ChangeScope',            N'VARCHAR(20)',    N'NULL', N'ALL_CHANGES to update any stats with changes; else uses threshold.', N'@ChangeScope = ''ALL_CHANGES'''),
-            (N'@SampleMode',             N'VARCHAR(12)',    N'''DEFAULT''', N'FULLSCAN, DEFAULT, or SAMPLED.',  N'@SampleMode = ''SAMPLED'''),
-            (N'@SamplePercent',          N'DECIMAL(6,2)',   N'NULL', N'When @SampleMode = SAMPLED: 1..100 (rounded to whole % on SQL 2014).', N'@SamplePercent = 10.0'),
-            (N'@WhatIf',                 N'BIT',            N'1', N'1=dry-run (log/print only); 0=execute UPDATE STATISTICS.', N'@WhatIf = 0')
+            (N'@TargetDatabases',        N'NVARCHAR(MAX)',  N'NULL',
+                N'CSV or ALL_USER_DBS (exact case). Use ''-DbName'' to exclude.',
+                N'@TargetDatabases = N''ALL_USER_DBS,-DBA,-UtilityDb'''),
+            (N'@ChangeThresholdPercent', N'DECIMAL(6,2)',   N'NULL',
+                N'Update when change% >= this (dm_db_stats_properties).',
+                N'@ChangeThresholdPercent = 20.0'),
+            (N'@ChangeScope',            N'VARCHAR(20)',    N'NULL',
+                N'ALL_CHANGES to update any stats with changes; else uses threshold.',
+                N'@ChangeScope = ''ALL_CHANGES'''),
+            (N'@SampleMode',             N'VARCHAR(12)',    N'''DEFAULT''',
+                N'FULLSCAN, DEFAULT, or SAMPLED.',
+                N'@SampleMode = ''SAMPLED'''),
+            (N'@SamplePercent',          N'DECIMAL(6,2)',   N'NULL',
+                N'When @SampleMode = SAMPLED: 1..100 (rounded to whole % on SQL 2014).',
+                N'@SamplePercent = 10.0'),
+            (N'@WhatIf',                 N'BIT',            N'1',
+                N'1=dry-run (log/print only); 0=execute UPDATE STATISTICS.',
+                N'@WhatIf = 0')
         ) d(param_name, sql_type, default_value, description, example);
 
         SELECT example_label, example_command
@@ -111,7 +128,9 @@ BEGIN
             (N'All user DBs except DBA, ALL_CHANGES, SAMPLED 10% (dry run)',
              N'EXEC DBA.usp_UpdateStatisticsIfChanged @TargetDatabases = N''ALL_USER_DBS,-DBA'', @ChangeScope = ''ALL_CHANGES'', @SampleMode = ''SAMPLED'', @SamplePercent = 10, @WhatIf = 1;'),
             (N'One DB, threshold 20%, DEFAULT (execute)',
-             N'EXEC DBA.usp_UpdateStatisticsIfChanged @TargetDatabases = N''YourDb'', @ChangeThresholdPercent = 20.0, @SampleMode = ''DEFAULT'', @WhatIf = 0;')
+             N'EXEC DBA.usp_UpdateStatisticsIfChanged @TargetDatabases = N''YourDb'', @ChangeThresholdPercent = 20.0, @SampleMode = ''DEFAULT'', @WhatIf = 0;'),
+            (N'One DB, inspect user and Change Tracking internal stats candidates',
+             N'EXEC DBA.usp_UpdateStatisticsIfChanged @TargetDatabases = N''YourDb'', @ChangeScope = ''ALL_CHANGES'', @WhatIf = 1;')
         ) x(example_label, example_command);
         RETURN;
     END;
@@ -308,7 +327,7 @@ BEGIN
             sp.rows_sampled,
             N''USE '' + QUOTENAME(DB_NAME()) + N''; UPDATE STATISTICS '' +
                 QUOTENAME(s.name) + N''.'' + QUOTENAME(t.name) + N'' '' + QUOTENAME(st.name) +
-                CASE 
+                CASE
                     WHEN @pSampleMode = N''FULLSCAN'' THEN N'' WITH FULLSCAN''
                     WHEN @pSampleMode = N''SAMPLED''  THEN N'' WITH SAMPLE '' + CONVERT(NVARCHAR(12), @pSamplePercent) + N'' PERCENT''
                     ELSE N''''
@@ -347,6 +366,101 @@ BEGIN
                @pChangeScope            NVARCHAR(20),
                @pSampleMode            NVARCHAR(12),
                @pSamplePercent         INT',
+             @pChangeThresholdPercent = @ChangeThresholdPercent,
+             @pChangeScope            = @ChangeScope,
+             @pSampleMode             = @SampleMode,
+             @pSamplePercent          = @SamplePercentInt;
+
+        -- Change Tracking side tables and the tracked commit table are internal
+        -- objects, so they are not returned by sys.tables above. Update all
+        -- statistics on each qualifying internal table with one command.
+        SET @SQL = N'SET NOCOUNT ON;
+
+        ;WITH CTStats AS
+        (
+            SELECT
+                it.object_id,
+                s.name AS schema_name,
+                it.name AS table_name,
+                st.stats_id,
+                partition_rows.table_rows,
+                sp.[rows],
+                sp.modification_counter,
+                CAST(
+                    CASE
+                        WHEN sp.[rows] IS NULL THEN NULL
+                        WHEN sp.[rows] = 0 THEN CASE WHEN sp.modification_counter > 0 THEN 100.0 ELSE 0.0 END
+                        ELSE (100.0 * CONVERT(DECIMAL(18,6), sp.modification_counter))
+                             / NULLIF(CONVERT(DECIMAL(18,6), sp.[rows]), 0)
+                    END AS DECIMAL(19,4)
+                ) AS change_pct,
+                sp.last_updated,
+                sp.rows_sampled
+            FROM sys.internal_tables AS it
+            JOIN sys.schemas AS s ON s.schema_id = it.schema_id
+            JOIN sys.stats AS st ON st.object_id = it.object_id
+            OUTER APPLY sys.dm_db_stats_properties(st.object_id, st.stats_id) AS sp
+            OUTER APPLY
+            (
+                SELECT SUM(p.[rows]) AS table_rows
+                FROM sys.partitions AS p
+                WHERE p.object_id = it.object_id AND p.index_id IN (0, 1)
+            ) AS partition_rows
+            LEFT JOIN sys.indexes AS i
+                ON i.object_id = st.object_id AND i.index_id = st.stats_id
+            WHERE it.internal_type IN (209, 210)
+              AND (i.index_id IS NULL OR i.is_hypothetical = 0)
+        ),
+        Eligible AS
+        (
+            SELECT *,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY object_id
+                    ORDER BY change_pct DESC, modification_counter DESC, stats_id
+                ) AS rn
+            FROM CTStats
+            WHERE (last_updated IS NULL AND table_rows > 0)
+               OR (@pChangeScope = N''ALL_CHANGES'' AND modification_counter > 0)
+               OR (@pChangeScope IS NULL AND
+                   (
+                       ([rows] = 0 AND modification_counter > 0)
+                       OR change_pct >= @pChangeThresholdPercent
+                   ))
+        )
+        SELECT
+            DB_NAME() AS database_name,
+            schema_name,
+            table_name,
+            N''ALL'' AS stats_name,
+            0 AS stats_id,
+            [rows],
+            modification_counter,
+            change_pct,
+            last_updated,
+            rows_sampled,
+            N''USE '' + QUOTENAME(DB_NAME()) + N''; UPDATE STATISTICS ''
+                + QUOTENAME(schema_name) + N''.'' + QUOTENAME(table_name)
+                + CASE
+                    WHEN @pSampleMode = N''FULLSCAN'' THEN N'' WITH FULLSCAN''
+                    WHEN @pSampleMode = N''SAMPLED'' THEN N'' WITH SAMPLE ''
+                         + CONVERT(NVARCHAR(12), @pSamplePercent) + N'' PERCENT''
+                    ELSE N''''
+                  END AS cmd
+        FROM Eligible
+        WHERE rn = 1;';
+
+        INSERT INTO #candidates
+        (
+            database_name, schema_name, table_name, stats_name, stats_id,
+            [rows], modification_counter, change_pct, last_updated, rows_sampled, cmd
+        )
+        EXEC @DynamicExec
+             @SQL,
+             N'@pChangeThresholdPercent DECIMAL(6,2),
+               @pChangeScope            NVARCHAR(20),
+               @pSampleMode             NVARCHAR(12),
+               @pSamplePercent          INT',
              @pChangeThresholdPercent = @ChangeThresholdPercent,
              @pChangeScope            = @ChangeScope,
              @pSampleMode             = @SampleMode,
@@ -514,3 +628,4 @@ BEGIN
     SET @msg = N'Completed stats run ' + CONVERT(NVARCHAR(36),@RunId) + N'.';
     RAISERROR(@msg,10,1) WITH NOWAIT;
 END;
+GO
